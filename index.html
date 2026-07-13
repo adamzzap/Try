@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HRM Parcel &amp; Zone Lookup</title>
+<style>
+  :root{
+    --paper:#E9EDEF; --panel:#FFFFFF; --ink:#14232E; --muted:#5B6A74;
+    --faint:#8895A0; --rule:#CFD7DC; --ruleSoft:#E6EBED; --accent:#0B5E86;
+    --accentSoft:#E4EFF4; --live:#1F8A54; --down:#B23A2A; --wait:#A9791B;
+    --field:#F4F7F8;
+    --mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,monospace;
+    --sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);
+    -webkit-font-smoothing:antialiased;padding:20px 16px 64px;}
+  .wrap{max-width:640px;margin:0 auto;}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:1.5px;color:var(--accent);text-transform:uppercase;}
+  h1{margin:4px 0 2px;font-size:26px;font-weight:600;letter-spacing:-.4px;}
+  .sub{margin:0;color:var(--muted);font-size:13.5px;line-height:1.5;}
+  .panel{background:var(--panel);border:1px solid var(--rule);border-radius:8px;}
+  .strip{display:flex;gap:14px;flex-wrap:wrap;align-items:center;padding:10px 12px;margin:16px 0 12px;}
+  .stat{display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:11.5px;color:var(--ink);}
+  .dot{width:8px;height:8px;border-radius:8px;flex:none;background:var(--faint);}
+  .dot.live{background:var(--live);box-shadow:0 0 0 3px #1F8A5422;}
+  .dot.down{background:var(--down);box-shadow:0 0 0 3px #B23A2A22;}
+  .dot.wait{background:var(--wait);box-shadow:0 0 0 3px #A9791B22;animation:pulse 1s infinite;}
+  @keyframes pulse{50%{opacity:.35}}
+  .search{padding:12px;}
+  .modes{display:flex;gap:6px;margin-bottom:10px;}
+  .mode{flex:1;padding:7px 0;font-size:12.5px;font-weight:600;border-radius:6px;cursor:pointer;
+    border:1px solid var(--rule);background:var(--panel);color:var(--muted);}
+  .mode.on{border-color:var(--accent);background:var(--accent);color:#fff;}
+  .row{display:flex;gap:8px;}
+  input[type=text]{flex:1;width:100%;padding:10px 12px;font-size:14px;border:1px solid var(--rule);
+    border-radius:6px;background:var(--field);color:var(--ink);font-family:var(--sans);}
+  .go{padding:10px 18px;font-size:14px;font-weight:600;border-radius:6px;border:none;cursor:pointer;
+    background:var(--accent);color:#fff;}
+  .go:disabled{background:var(--faint);cursor:default;}
+  .msg{margin-top:12px;padding:12px 14px;border-radius:8px;font-size:13.5px;line-height:1.5;}
+  .msg.err{background:#FBEDEA;border:1px solid #B23A2A44;color:var(--down);}
+  .empty{margin-top:12px;padding:28px 16px;text-align:center;color:var(--faint);
+    border:1px dashed var(--rule);border-radius:8px;font-size:13px;line-height:1.6;}
+  .res{margin-top:12px;overflow:hidden;}
+  .res-head{padding:14px 16px;border-bottom:1px solid var(--ruleSoft);display:flex;
+    justify-content:space-between;align-items:flex-start;gap:12px;}
+  .res-title{font-size:16px;font-weight:600;line-height:1.3;}
+  .res-sub{font-size:11.5px;color:var(--muted);margin-top:2px;}
+  .zone-big{font-family:var(--mono);font-size:30px;font-weight:600;color:var(--accent);letter-spacing:1px;line-height:1;}
+  .copy{font-size:12px;padding:6px 12px;border:1px solid var(--accent);background:var(--accentSoft);
+    color:var(--accent);border-radius:6px;cursor:pointer;font-weight:500;white-space:nowrap;}
+  .coords{padding:12px 16px;border-bottom:1px solid var(--ruleSoft);font-family:var(--mono);
+    font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;}
+  .coords .k{color:var(--faint);}
+  .section{padding:12px 16px;border-bottom:1px solid var(--ruleSoft);}
+  .section:last-child{border-bottom:none;}
+  .section h3{margin:0 0 8px;font-size:11px;text-transform:uppercase;letter-spacing:.8px;
+    color:var(--accent);font-weight:700;}
+  .attr{display:grid;grid-template-columns:42% 58%;gap:10px;font-size:12.5px;padding:3px 0;}
+  .attr .k{color:var(--muted);font-family:var(--mono);font-size:11.5px;word-break:break-word;}
+  .attr .v{word-break:break-word;}
+  .cand{width:100%;text-align:left;padding:9px 12px;border:1px solid var(--ruleSoft);background:var(--field);
+    border-radius:6px;cursor:pointer;font-size:13px;margin-top:6px;color:var(--ink);}
+  .cand:hover{border-color:var(--accent);}
+  .muted{font-size:12px;color:var(--muted);padding:4px 0;}
+  .adv-toggle{background:none;border:none;padding:0;cursor:pointer;color:var(--accent);font-size:12.5px;font-weight:600;}
+  .adv{margin-top:10px;padding:12px;font-size:11.5px;font-family:var(--mono);color:var(--muted);
+    background:var(--field);border-radius:6px;word-break:break-all;line-height:1.7;}
+  .foot{margin-top:18px;font-family:var(--mono);font-size:10.5px;color:var(--faint);
+    display:flex;justify-content:space-between;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="eyebrow">Halifax Regional Municipality · Open GIS</div>
+  <h1>Parcel &amp; Zone Lookup</h1>
+  <p class="sub">Address or PID → HRM's live civic-address and zoning layers → the LUB zone at that point. Runs directly against HRM Open Data.</p>
+
+  <div class="panel strip" id="strip">
+    <div class="stat"><span class="dot" id="d-zoning"></span>Zoning</div>
+    <div class="stat"><span class="dot" id="d-civic"></span>Civic addresses</div>
+    <div class="stat"><span class="dot" id="d-geo"></span>Geocoder</div>
+    <button class="adv-toggle" id="advBtn" style="margin-left:auto">Details</button>
+  </div>
+
+  <div class="panel search">
+    <div class="modes">
+      <button class="mode on" data-mode="address" id="m-address">Address</button>
+      <button class="mode" data-mode="pid" id="m-pid">PID</button>
+    </div>
+    <div class="row">
+      <input type="text" id="q" spellcheck="false" placeholder="89 Prince Albert Rd, Dartmouth" />
+      <button class="go" id="go">Look up</button>
+    </div>
+  </div>
+
+  <div id="out"></div>
+  <div class="empty" id="empty">Enter an address to run the pipeline.<br/>Resolving HRM layers…</div>
+  <div class="adv" id="adv" style="display:none"></div>
+
+  <div class="foot"><span>tool v2 · 2026-07-13</span><span>data © HRM Open Data · unofficial</span></div>
+</div>
+
+<script>
+"use strict";
+
+// HRM ArcGIS Online item IDs (resolved to live service URLs at runtime).
+const ITEMS = {
+  zoning: "11adc4e1e52a45b5b9f6bc63ef6e0883", // Zoning Boundaries (LUB zones)
+  civic:  "f743908984b546efb843677ce0dba731", // Civic Addresses (carries PID)
+};
+// HRM geocoder — best-effort address normalization (may be CORS-restricted).
+const GEOCODER =
+  "https://gisapp.halifax.ca/hrm/rest/services/HRM/Street_Range_Locator_WGS84/GeocodeServer";
+
+const state = {
+  mode: "address",
+  layers: {},   // {zoning:{url,fields,zoneField}, civic:{url,fields,pidField,addrFields}}
+  geoOK: null,
+  candidates: null,
+};
+
+const $ = (id) => document.getElementById(id);
+
+function setDot(id, s){ const el = $(id); el.className = "dot" + (s ? " " + s : ""); }
+
+function esc(s){ return String(s).replace(/'/g,"''"); }
+function mercToLatLon(x,y){
+  const lon = x/20037508.34*180;
+  let lat = y/20037508.34*180;
+  lat = 180/Math.PI*(2*Math.atan(Math.exp(lat*Math.PI/180))-Math.PI/2);
+  return {lat,lon};
+}
+async function j(url){
+  const r = await fetch(url);
+  if(!r.ok) throw new Error("HTTP "+r.status);
+  const d = await r.json();
+  if(d && d.error) throw new Error(d.error.message||"service error");
+  return d;
+}
+
+// Resolve an AGOL item to its FeatureServer URL + layer 0 schema.
+async function resolveLayer(id){
+  const item = await j(`https://www.arcgis.com/sharing/rest/content/items/${id}?f=json`);
+  if(!item.url) throw new Error("no service url on item");
+  const layerUrl = item.url.replace(/\/$/,"") + "/0";
+  const meta = await j(`${layerUrl}?f=json`);
+  return { url: layerUrl, fields: (meta.fields||[]).map(f=>f.name) };
+}
+
+function pickField(fields, tests){
+  for(const t of tests){
+    const hit = fields.find(f => t(f.toUpperCase()));
+    if(hit) return hit;
+  }
+  return null;
+}
+
+async function boot(){
+  setDot("d-zoning","wait"); setDot("d-civic","wait"); setDot("d-geo","wait");
+  // Connectivity probe: inside the Claude.ai artifact sandbox, ALL outbound
+  // requests are blocked, which makes every service look "down".
+  // Detect that case and say so honestly.
+  try{
+    await j("https://www.arcgis.com/sharing/rest?f=json");
+    state.network = true;
+  }catch(e){
+    state.network = false;
+    setDot("d-zoning","down"); setDot("d-civic","down"); setDot("d-geo","down");
+    $("empty").innerHTML =
+      "<b>This environment is blocking outbound requests.</b><br/>" +
+      "The tool itself is fine — HRM's services just can't be reached from " +
+      "inside the Claude.ai artifact sandbox.<br/><br/>" +
+      "Deploy this file (Vercel / GitHub Pages) or open it in a regular " +
+      "browser tab and it will connect immediately.";
+    renderAdv();
+    return;
+  }
+  // Zoning
+  try{
+    const z = await resolveLayer(ITEMS.zoning);
+    z.zoneField = pickField(z.fields, [
+      f => f === "ZONE", f => f.includes("ZONE_NAME"), f => f.includes("ZONE"),
+    ]);
+    state.layers.zoning = z; setDot("d-zoning","live");
+  }catch(e){ setDot("d-zoning","down"); state.layers.zoning = {error:e.message}; }
+  // Civic addresses
+  try{
+    const c = await resolveLayer(ITEMS.civic);
+    c.pidField = pickField(c.fields, [ f => f === "PID", f => f.includes("PID") ]);
+    c.addrFields = c.fields.filter(f =>
+      /ADDRESS|CIVIC|STREET|FULL/.test(f.toUpperCase())
+    );
+    state.layers.civic = c; setDot("d-civic","live");
+  }catch(e){ setDot("d-civic","down"); state.layers.civic = {error:e.message}; }
+
+  // Geocoder probe (non-blocking).
+  probeGeocoder();
+
+  renderAdv();
+  $("empty").innerHTML = state.layers.zoning && !state.layers.zoning.error
+    ? "Enter an address to run the pipeline."
+    : "Couldn't reach HRM's hosted layers. See Details.";
+}
+
+async function probeGeocoder(){
+  try{
+    await j(`${GEOCODER}?f=json`);
+    state.geoOK = true; setDot("d-geo","live");
+  }catch(e){ state.geoOK = false; setDot("d-geo","down"); }
+}
+
+// ---- Lookups --------------------------------------------------------------
+
+async function geocode(text){
+  const url = `${GEOCODER}/findAddressCandidates?SingleLine=${encodeURIComponent(text)}`
+    + `&outFields=*&maxLocations=1&outSR=102100&f=json`;
+  const d = await j(url);
+  const c = d.candidates && d.candidates[0];
+  if(!c) return null;
+  return { x:c.location.x, y:c.location.y, label:c.address, score:c.score, attrs:c.attributes||{} };
+}
+
+// Fallback / PID path: query Civic Addresses layer directly.
+async function queryCivic(where, limit){
+  const c = state.layers.civic;
+  if(!c || c.error) throw new Error("Civic Addresses layer unavailable.");
+  const url = `${c.url}/query?where=${encodeURIComponent(where)}`
+    + `&outFields=*&returnGeometry=true&outSR=102100&resultRecordCount=${limit||8}&f=json`;
+  const d = await j(url);
+  return (d.features||[]).map(f=>{
+    const g = f.geometry||{};
+    const x = g.x!=null?g.x:(g.rings?ringCentroid(g.rings[0]).x:null);
+    const y = g.y!=null?g.y:(g.rings?ringCentroid(g.rings[0]).y:null);
+    return { x, y, attrs:f.attributes||{} };
+  }).filter(r=>r.x!=null);
+}
+function ringCentroid(pts){
+  let x=0,y=0; pts.forEach(p=>{x+=p[0];y+=p[1];}); return {x:x/pts.length,y:y/pts.length};
+}
+
+async function zoneAt(x,y){
+  const z = state.layers.zoning;
+  if(!z || z.error) return {error:"Zoning layer unavailable."};
+  const geom = JSON.stringify({x,y,spatialReference:{wkid:102100}});
+  const url = `${z.url}/query?geometry=${encodeURIComponent(geom)}`
+    + `&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects`
+    + `&outFields=*&returnGeometry=false&f=json`;
+  try{
+    const d = await j(url);
+    const f = d.features && d.features[0];
+    return f ? {attrs:f.attributes, zoneField:z.zoneField} : {empty:true};
+  }catch(e){ return {error:e.message}; }
+}
+
+// ---- Orchestration --------------------------------------------------------
+
+async function run(){
+  const text = $("q").value.trim();
+  clearOut(); state.candidates = null;
+  if(!text) return;
+  $("go").disabled = true; $("go").textContent = "…";
+  try{
+    if(state.mode === "pid") await runPID(text);
+    else await runAddress(text);
+  }catch(e){
+    showErr(e.message || "Lookup failed.");
+  }finally{
+    $("go").disabled = false; $("go").textContent = "Look up";
+  }
+}
+
+async function runAddress(text){
+  let pt = null;
+  // Try geocoder first for clean normalization.
+  if(state.geoOK !== false){
+    try{ pt = await geocode(text); }catch(e){ state.geoOK = false; setDot("d-geo","down"); }
+  }
+  // Fallback: match against Civic Addresses.
+  if(!pt){
+    const c = state.layers.civic;
+    if(!c || c.error){ showErr("No geocoder and no Civic Addresses layer available. See Details."); return; }
+    const tokens = text.split(",")[0].trim().toUpperCase().split(/\s+/).filter(Boolean);
+    const like = "%" + tokens.join("%") + "%";
+    const field = c.addrFields[0];
+    if(!field){ showErr("Civic Addresses layer has no address-like field to search."); return; }
+    const where = c.addrFields.slice(0,3)
+      .map(f=>`UPPER(${f}) LIKE '${esc(like)}'`).join(" OR ");
+    const rows = await queryCivic(where, 8);
+    if(!rows.length){ showErr("No civic-address match. Try just the number and street, e.g. \"89 Prince Albert\"."); return; }
+    if(rows.length > 1){ renderCandidates(rows); return; }
+    pt = { x:rows[0].x, y:rows[0].y, label:pickLabel(rows[0].attrs), attrs:rows[0].attrs };
+  }
+  await finish(pt);
+}
+
+async function runPID(text){
+  const c = state.layers.civic;
+  if(!c || c.error){ showErr("Civic Addresses layer unavailable — can't look up by PID."); return; }
+  if(!c.pidField){ showErr("No PID field found on the Civic Addresses layer. See Details for field names."); return; }
+  const rows = await queryCivic(`${c.pidField}='${esc(text)}'`, 5);
+  if(!rows.length){ showErr(`No record where ${c.pidField} = ${text}.`); return; }
+  const r = rows[0];
+  await finish({ x:r.x, y:r.y, label:pickLabel(r.attrs)||("PID "+text), attrs:r.attrs });
+}
+
+function pickLabel(attrs){
+  const c = state.layers.civic;
+  if(c && c.addrFields){
+    for(const f of c.addrFields){ if(attrs[f]) return attrs[f]; }
+  }
+  return null;
+}
+
+async function finish(pt){
+  const ll = mercToLatLon(pt.x, pt.y);
+  const zone = await zoneAt(pt.x, pt.y);
+  renderResult({ pt, ll, zone });
+}
+
+// ---- Rendering ------------------------------------------------------------
+
+function clearOut(){ $("out").innerHTML = ""; $("empty").style.display = "none"; }
+function showErr(m){ clearOut(); $("out").innerHTML = `<div class="msg err">${m}</div>`; }
+
+function renderCandidates(rows){
+  clearOut();
+  const items = rows.map((r,i)=>{
+    const label = pickLabel(r.attrs) || ("record "+(i+1));
+    return `<button class="cand" data-i="${i}">${label}</button>`;
+  }).join("");
+  $("out").innerHTML = `<div class="panel section"><h3>Which address?</h3>${items}</div>`;
+  state.candidates = rows;
+  document.querySelectorAll(".cand").forEach(b=>{
+    b.onclick = ()=>{
+      const r = state.candidates[+b.dataset.i];
+      finish({ x:r.x, y:r.y, label:pickLabel(r.attrs), attrs:r.attrs });
+    };
+  });
+}
+
+function attrTable(attrs){
+  const rows = Object.entries(attrs||{}).filter(([k,v])=>
+    v!==null && v!=="" && v!==" " && !/^(SHAPE|OBJECTID|GLOBALID)/i.test(k)
+  );
+  if(!rows.length) return `<div class="muted">No attributes.</div>`;
+  return rows.map(([k,v])=>`<div class="attr"><span class="k">${k}</span><span class="v">${String(v)}</span></div>`).join("");
+}
+
+let LAST = null;
+function renderResult({pt, ll, zone}){
+  LAST = {pt, ll, zone};
+  clearOut();
+  const zoneVal = zone && zone.attrs && zone.zoneField ? zone.attrs[zone.zoneField] : null;
+  const zoneHtml = zone.error
+    ? `<div class="muted" style="color:var(--down)">${zone.error}</div>`
+    : zone.empty
+      ? `<div class="muted">Point falls outside any zoning polygon (may be outside a LUB area).</div>`
+      : (zoneVal ? `<div class="zone-big">${zoneVal}</div>` : "") + attrTable(zone.attrs);
+
+  $("out").innerHTML = `
+    <div class="panel res">
+      <div class="res-head">
+        <div>
+          <div class="res-title">${pt.label || "Location"}</div>
+          ${pt.score!=null?`<div class="res-sub">match score ${Math.round(pt.score)}</div>`:""}
+        </div>
+        <button class="copy" id="copy">Copy for cut sheet</button>
+      </div>
+      <div class="coords">
+        <span class="k">lat</span><span class="k">lon</span>
+        <span>${ll.lat.toFixed(6)}</span><span>${ll.lon.toFixed(6)}</span>
+        <span class="k" style="margin-top:6px">x (3857)</span><span class="k" style="margin-top:6px">y (3857)</span>
+        <span>${Math.round(pt.x)}</span><span>${Math.round(pt.y)}</span>
+      </div>
+      <div class="section"><h3>Land-use zone (LUB)</h3>${zoneHtml}</div>
+      ${pt.attrs && Object.keys(pt.attrs).length ? `<div class="section"><h3>Civic record</h3>${attrTable(pt.attrs)}</div>`:""}
+    </div>`;
+  $("copy").onclick = copyCutSheet;
+}
+
+function copyCutSheet(){
+  if(!LAST) return;
+  const {pt, ll, zone} = LAST;
+  const zoneVal = zone && zone.attrs && zone.zoneField ? zone.attrs[zone.zoneField] : "(none)";
+  let t = `${pt.label||"Location"}\n`;
+  t += `Zone (LUB): ${zoneVal}\n`;
+  t += `Coordinates: ${ll.lat.toFixed(6)}, ${ll.lon.toFixed(6)}\n`;
+  t += `Web Mercator: ${Math.round(pt.x)}, ${Math.round(pt.y)}\n`;
+  if(pt.attrs){
+    const pid = state.layers.civic && state.layers.civic.pidField;
+    if(pid && pt.attrs[pid]) t += `PID: ${pt.attrs[pid]}\n`;
+  }
+  navigator.clipboard && navigator.clipboard.writeText(t);
+  const b = $("copy"); b.textContent = "Copied"; setTimeout(()=>b.textContent="Copy for cut sheet",1400);
+}
+
+function renderAdv(){
+  const z = state.layers.zoning || {}, c = state.layers.civic || {};
+  const net = state.network===false
+    ? "BLOCKED — sandboxed environment prevents outbound requests.\nDeploy or open outside Claude.ai.\n\n"
+    : "";
+  $("adv").innerHTML = net +
+    `zoning → ${z.url||z.error||"?"}\n` +
+    `  zone field: ${z.zoneField||"(not detected)"}\n\n` +
+    `civic → ${c.url||c.error||"?"}\n` +
+    `  PID field: ${c.pidField||"(not detected)"}\n` +
+    `  address fields: ${(c.addrFields||[]).join(", ")||"(none)"}\n\n` +
+    `geocoder: ${state.geoOK===null?"probing":state.geoOK?"reachable":"blocked (using civic fallback)"}`;
+}
+
+// ---- Wiring ---------------------------------------------------------------
+document.querySelectorAll(".mode").forEach(b=>{
+  b.onclick = ()=>{
+    state.mode = b.dataset.mode;
+    document.querySelectorAll(".mode").forEach(x=>x.classList.remove("on"));
+    b.classList.add("on");
+    $("q").placeholder = state.mode==="pid" ? "e.g. 00012345" : "89 Prince Albert Rd, Dartmouth";
+  };
+});
+$("go").onclick = run;
+$("q").addEventListener("keydown", e=>{ if(e.key==="Enter") run(); });
+$("advBtn").onclick = ()=>{
+  const a = $("adv"); a.style.display = a.style.display==="none" ? "block" : "none";
+  renderAdv();
+};
+
+boot();
+</script>
+</body>
+</html>
