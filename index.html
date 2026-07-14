@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v29 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v30 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -209,9 +209,14 @@ function boot(){
     // Resolve the street-centreline service by name (varies: Street_Centrelines,
     // StreetCentreLines, Road_Segments, etc.) so across-road classification works.
     try{
-      var svc = (dir.services||[]).find(function(x){
-        return /street.*(centre|center)line|centreline|centerline|road.*seg|street.*seg/i.test(x.name);
-      }) || (dir.services||[]).find(function(x){ return /street|road/i.test(x.name) && /Feature/i.test(x.type); });
+      var svcList = dir.services||[];
+      // Exact/most-specific first, and NEVER a slope/contour/analysis layer
+      // (a prior version wrongly grabbed "Average_Street_Slope").
+      var bad = /slope|contour|elevation|width|light|sweep|clean|snow|slow|speed|park|truck|transit|bus|name.?route/i;
+      var svc =
+        svcList.find(function(x){ return /^Street_?Centre?lines?$/i.test(x.name); }) ||
+        svcList.find(function(x){ return /street.?centre?line|road.?centre?line/i.test(x.name) && !bad.test(x.name); }) ||
+        svcList.find(function(x){ return /street.?network|road.?network|road.?segment|street.?segment/i.test(x.name) && !bad.test(x.name); });
       if(svc) STREETS_SVC = ORG + "/" + svc.name + "/" + svc.type + "/0";
     }catch(e){}
     var areaScan = discoverAreaLayer(dir);
@@ -997,7 +1002,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v29)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v30)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
