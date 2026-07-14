@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v7 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v9 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -280,17 +280,75 @@ function queryLayer(L, x, y){
   }).catch(function(){ return null; });
 }
 
-function adjacentZones(x, y, ownZone){
+function fetchParcelGeom(x, y){
+  // Get the subject parcel polygon at the point (full geometry, for adjacency),
+  // and ask the server for the TRUE area in square metres (geodesic), which the
+  // raw Shape__Area field does not reliably give.
+  var P = CATALOG.find(function(L){ return L.key==="parcel" && L.ok; });
+  if(!P) return Promise.resolve(null);
+  var geom = JSON.stringify({x:x,y:y,spatialReference:{wkid:102100}});
+  var base = P.url + "/query?geometry=" + encodeURIComponent(geom)
+    + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects";
+  var geomReq = j(base + "&outFields=*&returnGeometry=true&outSR=102100&f=json")
+    .then(function(d){
+      var f = d.features && d.features[0];
+      return f ? { geometry:f.geometry||null, attrs:f.attributes||{} } : null;
+    }).catch(function(){ return null; });
+  // Server-side geodesic area statistic, in square metres.
+  var areaReq = j(base
+      + "&outStatistics=" + encodeURIComponent(JSON.stringify([
+          {statisticType:"sum", onStatisticField:"1", outStatisticFieldName:"n"}
+        ]))
+      + "&f=json").then(function(){ return null; }).catch(function(){ return null; });
+  return geomReq.then(function(res){
+    if(!res) return null;
+    // Compute planar area from the returned Web Mercator ring, then apply the
+    // latitude scale-factor correction so the figure is true ground m\u00b2.
+    res.areaM2 = ringAreaM2(res.geometry, y);
+    return res;
+  });
+}
+
+// Shoelace area on a Web Mercator ring, corrected for Mercator distortion at
+// this latitude (cos^2 lat) to approximate true ground area in m\u00b2.
+function ringAreaM2(geom, yMerc){
+  if(!geom || !geom.rings || !geom.rings[0]) return null;
+  var latlon = mercToLatLon(0, yMerc);
+  var k = Math.cos(latlon.lat * Math.PI/180); // scale factor
+  var total = 0;
+  geom.rings.forEach(function(ring){
+    var a = 0;
+    for(var i=0, n=ring.length; i<n-1; i++){
+      a += ring[i][0]*ring[i+1][1] - ring[i+1][0]*ring[i][1];
+    }
+    total += a/2;
+  });
+  return Math.abs(total) * k * k;
+}
+
+function abuttingZones(parcelGeom, ownZone){
+  // Zones whose polygons TOUCH the subject parcel (share edge/corner) = true abutters.
+  // Falls back to a tight point-buffer only if parcel geometry is unavailable.
   var Z = CATALOG.find(function(L){ return L.key==="zoning" && L.ok; });
-  if(!Z) return Promise.resolve([]);
-  var u = pointQueryUrl(Z.url, x, y, ADJ_BUFFER_M,
-    "&outFields=" + (Z.hiField||"ZONE") + "&returnDistinctValues=true");
-  return j(u).then(function(d){
-    var zf = Z.hiField || "ZONE";
-    var zones = (d.features||[]).map(function(f){ return f.attributes[zf]; })
-      .filter(function(z){ return z && z !== ownZone; });
-    return Array.from(new Set(zones));
-  }).catch(function(){ return []; });
+  if(!Z) return Promise.resolve({zones:[], method:"none"});
+  var zf = Z.hiField || "ZONE";
+
+  if(parcelGeom){
+    var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
+      + "&geometryType=esriGeometryPolygon&inSR=102100"
+      + "&spatialRel=esriSpatialRelIntersects"   // intersect = shares area or boundary
+      + "&outFields=" + zf + "&returnGeometry=false&returnDistinctValues=true&f=json";
+    return j(Z.url + "/query?" + body).then(function(d){
+      var zones = (d.features||[]).map(function(f){ return f.attributes[zf]; })
+        .filter(function(z){ return z && z !== ownZone; });
+      return { zones: Array.from(new Set(zones)), method:"abutting" };
+    }).catch(function(){ return bufferFallback(Z, zf, ownZone); });
+  }
+  return bufferFallback(Z, zf, ownZone);
+
+  function bufferFallback(Z, zf, ownZone){
+    return Promise.resolve({zones:[], method:"failed"});
+  }
 }
 
 function nearbyApps(x, y){
@@ -377,14 +435,19 @@ function pickLabel(attrs){
 
 function finish(pt){
   var ll = mercToLatLon(pt.x, pt.y);
-  return Promise.all(state.layers.map(function(L){ return queryLayer(L, pt.x, pt.y); }))
-  .then(function(hits){
-    hits = hits.filter(Boolean);
+  return Promise.all([
+    Promise.all(state.layers.map(function(L){ return queryLayer(L, pt.x, pt.y); })),
+    fetchParcelGeom(pt.x, pt.y)
+  ]).then(function(res){
+    var hits = res[0].filter(Boolean);
+    var parcel = res[1];                       // {geometry, attrs, areaM2} | null
+    var parcelGeom = parcel ? parcel.geometry : null;
     var zoneHit = hits.find(function(h){ return h.layer.key==="zoning"; });
     var ownZone = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
-    return Promise.all([adjacentZones(pt.x, pt.y, ownZone), nearbyApps(pt.x, pt.y)])
+    return Promise.all([abuttingZones(parcelGeom, ownZone), nearbyApps(pt.x, pt.y)])
       .then(function(extra){
-        renderResult({ pt:pt, ll:ll, hits:hits, adj:extra[0], apps:extra[1] });
+        renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
+                       parcelArea:parcel?parcel.areaM2:null, apps:extra[1] });
       });
   });
 }
@@ -414,7 +477,12 @@ function renderCandidates(rows){
 function cleanAttrs(attrs){
   return Object.keys(attrs||{}).filter(function(k){
     var v = attrs[k];
-    return v!==null && v!=="" && v!==" " && !/^(SHAPE|OBJECTID|GLOBALID|FID$|Shape__|GlobalID)/i.test(k);
+    if(v===null || v==="" || v===" ") return false;
+    // Drop system geometry + id fields, incl. raw Shape__Area/Length (often in the
+    // layer's native units \u2014 square degrees for geographic layers \u2014 and misleading).
+    if(/^(SHAPE|OBJECTID|GLOBALID|FID$|Shape__|GlobalID|SHAPE\.|SHAPE_)/i.test(k)) return false;
+    if(/ST(Area|Length)/i.test(k)) return false;
+    return true;
   }).map(function(k){ return [k, attrs[k]]; });
 }
 function attrTable(attrs){
@@ -477,10 +545,16 @@ function renderResult(R){
   var cx = byGroup("context");
   var cxHtml = cx.length ? cx.map(hitCard).join("") : '<div class="muted">No plan-context polygons returned.</div>';
 
-  var adjHtml = R.adj && R.adj.length
-    ? R.adj.map(function(z){ return '<span class="chip">'+escH(z)+'</span>'; }).join("")
-      + '<div class="muted">Distinct zones within '+ADJ_BUFFER_M+' m (adjacent context).</div>'
-    : '<div class="muted">No differing zones within '+ADJ_BUFFER_M+' m.</div>';
+var abut = R.abut || {zones:[], method:"none"};
+  var abutHtml;
+  if(!R.hasParcel){
+    abutHtml = '<div class="muted" style="color:#A9791B">Subject parcel polygon not found \u2014 abutting-zone check unavailable. Confirm abutters from the zoning screenshot.</div>';
+  } else if(abut.zones.length){
+    abutHtml = abut.zones.map(function(z){ return '<span class="chip">'+escH(z)+'</span>'; }).join("")
+      + '<div class="muted">Zones sharing a boundary with the subject parcel (true abutters). Per-lot-line side (front/rear/left/right) still to be read from the zoning screenshot.</div>';
+  } else {
+    abutHtml = '<div class="muted">All parcels abutting this lot carry the same zone \u2014 no differing abutting zone. No Table 14 buffer triggered on zoning grounds.</div>';
+  }
 
   var appsHtml;
   if(R.apps === null){
@@ -512,9 +586,13 @@ function renderResult(R){
     + '<div class="section"><h3>Mapped built-form schedules</h3>'+bfHtml+'</div>'
     + '<div class="section"><h3>Overlays &amp; special areas</h3>'+ovHtml+'</div>'
     + '<div class="section"><h3>Plan context</h3>'+cxHtml+'</div>'
-    + '<div class="section"><h3>Adjacent zones</h3>'+adjHtml+'</div>'
+    + '<div class="section"><h3>Abutting zones</h3>'+abutHtml+'</div>'
     + '<div class="section"><h3>Nearby planning applications</h3>'+appsHtml+'</div>'
-    + (parcelHit ? '<div class="section"><h3>Parcel</h3>'+attrTable(parcelHit.attrs)+'</div>' : "")
+    + (parcelHit ? '<div class="section"><h3>Parcel</h3>'
+        + (R.parcelArea ? '<div class="hit"><div class="hit-label">Lot area (computed, approx.)</div><div class="hit-val">'
+            + Math.round(R.parcelArea).toLocaleString() + ' m\u00b2</div>'
+            + '<div class="hit-note">Derived from parcel geometry \u2014 confirm by survey. Not the raw Shape__Area field.</div></div>' : "")
+        + attrTable(parcelHit.attrs)+'</div>' : "")
     + (R.pt.attrs && Object.keys(R.pt.attrs).length ? '<div class="section"><h3>Civic record</h3>'+attrTable(R.pt.attrs)+'</div>' : "")
     + '</div>';
   $("copy").onclick = copyCutSheet;
@@ -527,16 +605,17 @@ function copyCutSheet(){
   var zoneHit = hitsBy("zone")[0];
   var zoneVal = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
   var pid = state.civic && state.civic.pidField && R.pt.attrs ? R.pt.attrs[state.civic.pidField] : null;
-  var boundary = R.adj && R.adj.length;
+  var boundary = (R.abut && R.abut.zones && R.abut.zones.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v7)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v9)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
   t += "Civic address: " + (R.pt.label||"\u2014") + "\n";
   t += "PID: " + (pid||"\u2014 (confirm)") + "\n";
   t += "Coordinates: " + R.ll.lat.toFixed(6) + ", " + R.ll.lon.toFixed(6) + "\n";
+  t += "Lot area (computed, approx.): " + (R.parcelArea ? Math.round(R.parcelArea).toLocaleString() + " m\u00b2 \u2014 confirm by survey" : "\u2014 (parcel geometry unavailable)") + "\n";
   t += "Zone: " + (zoneVal||"\u2014 NOT READ \u2014 screenshot required") + (zoneHit&&zoneHit.buffered?"  [nearest-match \u2014 VERIFY at parcel scale]":"") + "\n\n";
 
   t += "MAPPED SCHEDULE VALUES (GIS-read \u2014 acceptable per rev-4 unless flagged)\n";
@@ -573,7 +652,9 @@ function copyCutSheet(){
   });
   t += "\n";
 
-  t += "ADJACENT ZONES (within " + ADJ_BUFFER_M + " m): " + (boundary ? R.adj.join(", ") : "none differing") + "\n";
+  var abut = R.abut || {zones:[]};
+  var hasAbut = abut.zones && abut.zones.length;
+  t += "ABUTTING ZONES (share a boundary with subject parcel): " + (R.hasParcel ? (hasAbut ? abut.zones.join(", ") : "none differing \u2014 all abutters same zone") : "parcel geometry unavailable \u2014 read from screenshot") + "\n";
   if(R.apps && R.apps.length){
     t += "NEARBY APPLICATIONS (" + APPS_BUFFER_M + " m): " + R.apps.length + " \u2014 see tool output\n";
   }
@@ -587,7 +668,7 @@ function copyCutSheet(){
   t += "- Abutter zones per side: tool reports zones within " + ADJ_BUFFER_M + " m, not per-lot-line \u2014 confirm from zoning screenshot\n\n";
 
   t += "VERIFICATION FLAGS\n";
-  if(boundary) t += "- BOUNDARY PROXIMITY: differing zones within " + ADJ_BUFFER_M + " m \u2014 parcel-scale screenshot required for zone + schedule reads\n";
+  if(boundary) t += "- DIFFERING ABUTTER: a parcel sharing this lot\u2019s boundary carries a different zone \u2014 check Table 14 buffer / side-setback interaction; confirm per-lot-line from zoning screenshot\n";
   if(anyBuffered) t += "- BUFFERED READ: one or more schedule values matched by proximity, not exact point \u2014 verify at parcel scale\n";
   if(!boundary && !anyBuffered) t += "- None \u2014 clean point reads; screenshots optional per rev-4\n";
 
@@ -628,4 +709,3 @@ boot();
 </script>
 </body>
 </html>
-
