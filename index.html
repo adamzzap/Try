@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v25 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v26 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -418,7 +418,30 @@ function parseAreaUnits(str){
   return v; // metres
 }
 
-function fetchParcelGeom(x, y){
+function resolveCivicPID(x, y){
+  // Authoritative PID for the address, from HRM's Civic Addresses layer (which
+  // carries its own PID field) \u2014 used to fetch the parcel by exact key
+  // instead of guessing spatially among stacked/neighbouring polygons.
+  var c = state.civic;
+  if(!c || c.error || !c.pidField) return Promise.resolve(null);
+  var geom = JSON.stringify({x:x,y:y,spatialReference:{wkid:102100}});
+  var base = c.url + "/query?geometry=" + encodeURIComponent(geom)
+    + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects"
+    + "&outFields=" + c.pidField + "&returnGeometry=false&f=json";
+  function tryBuf(bufferM){
+    var u = base + (bufferM ? "&distance="+bufferM+"&units=esriSRUnit_Meter" : "");
+    return j(u).then(function(d){
+      var f = d.features && d.features[0];
+      return f && f.attributes[c.pidField] ? String(f.attributes[c.pidField]) : null;
+    }).catch(function(){ return null; });
+  }
+  return tryBuf(null).then(function(pid){
+    if(pid) return pid;
+    return tryBuf(15);
+  });
+}
+
+function fetchParcelGeom(x, y, knownPID){
   // Get the subject parcel polygon at the point (full geometry, for adjacency)
   // and its published AREAUNITS. Two-stage like the other layers: exact point
   // first; if that only turns up a sliver/placeholder record (or nothing),
@@ -426,6 +449,19 @@ function fetchParcelGeom(x, y){
   // feet from a geocoded street-address point on an irregular lot.
   var P = CATALOG.find(function(L){ return L.key==="parcel" && L.ok; });
   if(!P) return Promise.resolve(null);
+
+  function byPID(pid){
+    var u = P.url + "/query?where=" + encodeURIComponent("PID='" + String(pid).replace(/'/g,"''") + "'")
+      + "&outFields=*&returnGeometry=true&outSR=102100&f=json";
+    return j(u).then(function(d){
+      var f = (d.features||[])[0];
+      if(!f || !f.geometry) return null;
+      var m2 = parseAreaUnits(f.attributes && f.attributes.AREAUNITS);
+      return { geometry:f.geometry, attrs:f.attributes||{},
+               areaM2: (m2!=null && m2>=5) ? m2 : null,
+               areaSource: (m2!=null && m2>=5) ? "AREAUNITS" : "unpublished" };
+    }).catch(function(){ return null; });
+  }
 
   function pick(feats){
     feats = (feats||[]).filter(function(f){ return f.geometry && f.geometry.rings; });
@@ -459,7 +495,10 @@ function fetchParcelGeom(x, y){
     return j(u).then(function(d){ return d.features||[]; }).catch(function(){ return []; });
   }
 
-  return query(null).then(function(exact){
+  var authoritative = knownPID ? byPID(knownPID) : Promise.resolve(null);
+  return authoritative.then(function(direct){
+    if(direct) return direct;
+    return query(null).then(function(exact){
     var got = pick(exact);
     if(got) return got;
     // Exact point found nothing usable (empty, or sliver-only) \u2014 widen.
@@ -483,6 +522,7 @@ function fetchParcelGeom(x, y){
         return { geometry: best.geometry, attrs: best.attributes||{}, areaM2: null, areaSource: "unpublished" };
       });
     });
+  });
   });
 }
 
@@ -708,13 +748,24 @@ function lookupPublishedArea(px, py, parcelAttrs){
 
 function finish(pt){
   var ll = mercToLatLon(pt.x, pt.y);
+  return resolveCivicPID(pt.x, pt.y).then(function(civicPID){
   return Promise.all([
     Promise.all(state.layers.map(function(L){ return queryLayer(L, pt.x, pt.y); })),
-    fetchParcelGeom(pt.x, pt.y)
+    fetchParcelGeom(pt.x, pt.y, civicPID)
   ]).then(function(res){
     var hits = res[0].filter(Boolean);
     var parcel = res[1];                       // {geometry, attrs, areaM2} | null
     var parcelGeom = parcel ? parcel.geometry : null;
+    // Keep the displayed Parcel card in sync with the resolved parcel \u2014
+    // previously this used a separately-queried (and sometimes different)
+    // record, which is what caused the area figure and the PID shown below it
+    // to disagree.
+    if(parcel){
+      var pIdx = hits.findIndex(function(h){ return h.layer && h.layer.key==="parcel"; });
+      var pLayer = CATALOG.find(function(L){ return L.key==="parcel"; });
+      var newHit = { layer:pLayer, attrs:parcel.attrs, buffered:false };
+      if(pIdx>=0) hits[pIdx] = newHit; else hits.push(newHit);
+    }
     var zoneHit = hits.find(function(h){ return h.layer.key==="zoning"; });
     var ownZone = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
     return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y), lookupPublishedArea(pt.x, pt.y, parcel ? parcel.attrs : null)])
@@ -727,6 +778,7 @@ function finish(pt){
                        areaField: (parcel && parcel.areaM2 != null) ? "AREAUNITS" : (pubArea ? pubArea.field : null),
                        apps:extra[1] });
       });
+  });
   });
 }
 
@@ -934,7 +986,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v25)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v26)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
