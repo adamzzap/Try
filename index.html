@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v26 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v28 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -418,27 +418,24 @@ function parseAreaUnits(str){
   return v; // metres
 }
 
-function resolveCivicPID(x, y){
-  // Authoritative PID for the address, from HRM's Civic Addresses layer (which
-  // carries its own PID field) \u2014 used to fetch the parcel by exact key
-  // instead of guessing spatially among stacked/neighbouring polygons.
+function resolveCivicPID(matchedLabel){
+  // Authoritative PID for the address: match by ADDRESS TEXT on HRM's Civic
+  // Addresses layer (which carries both the address and PID on the same
+  // record) \u2014 zero geometry, zero distance, zero "nearest" guessing. This
+  // is a lookup by key, the same as the query the person already confirmed
+  // works (WHERE PID=...), just keyed on address instead.
   var c = state.civic;
-  if(!c || c.error || !c.pidField) return Promise.resolve(null);
-  var geom = JSON.stringify({x:x,y:y,spatialReference:{wkid:102100}});
-  var base = c.url + "/query?geometry=" + encodeURIComponent(geom)
-    + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects"
+  if(!c || c.error || !c.pidField || !matchedLabel) return Promise.resolve(null);
+  var addr = String(matchedLabel).split(",")[0].trim().toUpperCase();
+  var fields = c.addrFields.slice(0,3);
+  if(!fields.length) return Promise.resolve(null);
+  var where = fields.map(function(f){ return "UPPER("+f+")='"+esc(addr)+"'"; }).join(" OR ");
+  var u = c.url + "/query?where=" + encodeURIComponent(where)
     + "&outFields=" + c.pidField + "&returnGeometry=false&f=json";
-  function tryBuf(bufferM){
-    var u = base + (bufferM ? "&distance="+bufferM+"&units=esriSRUnit_Meter" : "");
-    return j(u).then(function(d){
-      var f = d.features && d.features[0];
-      return f && f.attributes[c.pidField] ? String(f.attributes[c.pidField]) : null;
-    }).catch(function(){ return null; });
-  }
-  return tryBuf(null).then(function(pid){
-    if(pid) return pid;
-    return tryBuf(15);
-  });
+  return j(u).then(function(d){
+    var f = d.features && d.features[0];
+    return f && f.attributes[c.pidField] ? String(f.attributes[c.pidField]) : null;
+  }).catch(function(){ return null; });
 }
 
 function fetchParcelGeom(x, y, knownPID){
@@ -748,7 +745,7 @@ function lookupPublishedArea(px, py, parcelAttrs){
 
 function finish(pt){
   var ll = mercToLatLon(pt.x, pt.y);
-  return resolveCivicPID(pt.x, pt.y).then(function(civicPID){
+  return resolveCivicPID(pt.label).then(function(civicPID){
   return Promise.all([
     Promise.all(state.layers.map(function(L){ return queryLayer(L, pt.x, pt.y); })),
     fetchParcelGeom(pt.x, pt.y, civicPID)
@@ -964,12 +961,19 @@ var abut = R.abut || {abutters:[], acrossRoad:[], method:"none"};
     + '<div class="section"><h3>Abutting zones</h3>'+abutHtml+'</div>'
     + '<div class="section"><h3>Nearby planning applications</h3>'+appsHtml+'</div>'
     + (parcelHit ? '<div class="section"><h3>Parcel</h3>'
-        + (R.parcelArea != null
-            ? '<div class="hit"><div class="hit-label">Area (lot) size \u2014 HRM</div>'
-              + '<div class="hit-val">' + Math.round(R.parcelArea).toLocaleString() + ' m\u00b2</div>'
-              + '<div class="hit-note">As published by HRM (Province of NS / PVSC). Confirm by survey for design.</div></div>'
-            : '<div class="hit"><div class="hit-label">Area (lot) size \u2014 HRM</div>'
-              + '<div class="hit-note">Not returned from HRM\u2019s area layer at this point \u2014 confirm on ExploreHRM / Property Online.</div></div>')
+        + (function(){
+            var vpUrl = "https://www.viewpoint.ca/search?q=" + encodeURIComponent(R.pt.label || "");
+            var vpLink = '<a href="'+vpUrl+'" target="_blank" rel="noopener" style="font-size:11px;color:var(--accent);text-decoration:underline">Verify on ViewPoint \u2192</a>';
+            if(R.parcelArea != null){
+              return '<div class="hit"><div class="hit-label">Area (lot) size \u2014 HRM</div>'
+                + '<div class="hit-val">' + Math.round(R.parcelArea).toLocaleString() + ' m\u00b2</div>'
+                + '<div class="hit-note">As published by HRM (Province of NS / PVSC), matched by PID \u2014 no spatial guessing. Confirm by survey for design.</div>'
+                + '<div style="margin-top:5px">'+vpLink+'</div></div>';
+            }
+            return '<div class="hit"><div class="hit-label">Area (lot) size \u2014 HRM</div>'
+              + '<div class="hit-note">Not returned from HRM\u2019s area layer for this PID \u2014 confirm on ExploreHRM / Property Online.</div>'
+              + '<div style="margin-top:5px">'+vpLink+'</div></div>';
+          })()
         + attrTable(parcelHit.attrs)+'</div>' : "")
     + (R.pt.attrs && Object.keys(R.pt.attrs).length ? '<div class="section"><h3>Civic record</h3>'+attrTable(R.pt.attrs)+'</div>' : "")
     + '</div>';
@@ -986,7 +990,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v26)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v28)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
