@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v10 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v12 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -268,16 +268,50 @@ function pointQueryUrl(layerUrl, x, y, bufferM, extra){
 }
 
 function queryLayer(L, x, y){
-  return j(pointQueryUrl(L.url, x, y, L.buffer)).then(function(d){
+  // Stage 1: EXACT point, no buffer. This returns only the polygon the point
+  // truly falls inside \u2014 critical near zone boundaries (e.g. COR abutting
+  // Downtown Dartmouth), where a buffer would wrongly catch the neighbour.
+  return j(pointQueryUrl(L.url, x, y)).then(function(d){
     var f = d.features && d.features[0];
-    if(f) return {layer:L, attrs:f.attributes, buffered:!!L.buffer};
-    if(L.buffer || L.group==="overlay" || L.group==="context") return null; // overlays: exact miss = doesn't apply
-    // zone/builtform/parcel polygons: retry buffered (address pin sits on street)
-    return j(pointQueryUrl(L.url, x, y, BUFFER_M)).then(function(d2){
-      var f2 = d2.features && d2.features[0];
-      return f2 ? {layer:L, attrs:f2.attributes, buffered:true} : null;
-    });
+    if(f) return {layer:L, attrs:f.attributes, buffered:false};
+
+    // Overlays/context: an exact miss means the layer genuinely doesn't apply.
+    if(L.group==="overlay" || L.group==="context") return null;
+
+    // Stage 2 (zone / builtform / parcel only): the point may sit on the road
+    // right-of-way, which isn't zoned. Retry with a buffer, but return the
+    // NEAREST polygon, not the first \u2014 so a boundary straddle still yields
+    // the polygon closest to the actual point.
+    var bufUrl = pointQueryUrl(L.url, x, y, L.buffer || BUFFER_M)
+      .replace("&returnGeometry=false", "&returnGeometry=true");
+    return j(bufUrl).then(function(d2){
+      var feats = (d2.features||[]).filter(Boolean);
+      if(!feats.length) return null;
+      if(feats.length === 1) return {layer:L, attrs:feats[0].attributes, buffered:true};
+      // Pick the feature whose geometry is nearest to the point.
+      var best = null, bestD = Infinity;
+      feats.forEach(function(ft){
+        var d = nearestRingDist(ft.geometry, x, y);
+        if(d < bestD){ bestD = d; best = ft; }
+      });
+      return {layer:L, attrs:(best||feats[0]).attributes, buffered:true};
+    }).catch(function(){ return null; });
   }).catch(function(){ return null; });
+}
+
+// Minimum distance from point (x,y) to any vertex of a polygon's rings.
+// Good enough to rank which candidate polygon is closest to the point.
+function nearestRingDist(geom, x, y){
+  if(!geom || !geom.rings) return Infinity;
+  var min = Infinity;
+  geom.rings.forEach(function(ring){
+    for(var i=0;i<ring.length;i++){
+      var dx = ring[i][0]-x, dy = ring[i][1]-y;
+      var d = dx*dx + dy*dy;
+      if(d < min) min = d;
+    }
+  });
+  return min;
 }
 
 function fetchParcelGeom(x, y){
@@ -322,29 +356,52 @@ function ringAreaM2(geom, yMerc){
   return Math.abs(a/2) * k * k;
 }
 
+function shrinkPolygon(geom, metres){
+  // Pull each vertex toward the ring centroid by ~metres. Approximate but
+  // enough to clear a street-centerline contact while preserving side/rear
+  // adjacency. Returns a geometry usable as a query input.
+  if(!geom || !geom.rings || !geom.rings.length) return null;
+  var out = { rings: [], spatialReference:{wkid:102100} };
+  geom.rings.forEach(function(ring){
+    // centroid of this ring
+    var cx=0, cy=0, n=ring.length;
+    ring.forEach(function(p){ cx+=p[0]; cy+=p[1]; });
+    cx/=n; cy/=n;
+    var pulled = ring.map(function(p){
+      var dx = cx-p[0], dy = cy-p[1];
+      var len = Math.sqrt(dx*dx+dy*dy) || 1;
+      var f = Math.min(metres, len*0.45) / len;  // never collapse past ~centre
+      return [ p[0] + dx*f, p[1] + dy*f ];
+    });
+    out.rings.push(pulled);
+  });
+  return out;
+}
+
 function abuttingZones(parcelGeom, ownZone){
-  // Zones whose polygons TOUCH the subject parcel (share edge/corner) = true abutters.
-  // Falls back to a tight point-buffer only if parcel geometry is unavailable.
+  // True abutters share the subject's PROPERTY line. HRM parcels run to the
+  // street centerline, so a plain "touches" wrongly catches parcels across the
+  // road. Fix: shrink the parcel inward, then test zones within a small collar
+  // around the shrunk shape \u2014 hugs the property line, can't cross a street.
   var Z = CATALOG.find(function(L){ return L.key==="zoning" && L.ok; });
   if(!Z) return Promise.resolve({zones:[], method:"none"});
   var zf = Z.hiField || "ZONE";
-
-  if(parcelGeom){
-    var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
-      + "&geometryType=esriGeometryPolygon&inSR=102100"
-      + "&spatialRel=esriSpatialRelTouches"      // touches = shares only a boundary (true abutter)
-      + "&outFields=" + zf + "&returnGeometry=false&returnDistinctValues=true&f=json";
-    return j(Z.url + "/query?" + body).then(function(d){
-      var zones = (d.features||[]).map(function(f){ return f.attributes[zf]; })
-        .filter(function(z){ return z && z !== ownZone; });
-      return { zones: Array.from(new Set(zones)), method:"abutting" };
-    }).catch(function(){ return bufferFallback(Z, zf, ownZone); });
+  if(!parcelGeom || !parcelGeom.rings){
+    return Promise.resolve({zones:[], method:"noparcel"});
   }
-  return bufferFallback(Z, zf, ownZone);
+  var shrunk = shrinkPolygon(parcelGeom, 2.5);
+  if(!shrunk) return Promise.resolve({zones:[], method:"noparcel"});
 
-  function bufferFallback(Z, zf, ownZone){
-    return Promise.resolve({zones:[], method:"failed"});
-  }
+  var body = "geometry=" + encodeURIComponent(JSON.stringify(shrunk))
+    + "&geometryType=esriGeometryPolygon&inSR=102100"
+    + "&spatialRel=esriSpatialRelIntersects"
+    + "&distance=3&units=esriSRUnit_Meter"      // ~3 m collar around shrunk parcel
+    + "&outFields=" + zf + "&returnGeometry=false&returnDistinctValues=true&f=json";
+  return j(Z.url + "/query?" + body).then(function(d){
+    var zones = (d.features||[]).map(function(f){ return f.attributes[zf]; })
+      .filter(function(z){ return z && z !== ownZone; });
+    return { zones: Array.from(new Set(zones)), method:"collar" };
+  }).catch(function(){ return {zones:[], method:"failed"}; });
 }
 
 function nearbyApps(x, y){
@@ -604,7 +661,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.zones && R.abut.zones.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v10)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v12)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
