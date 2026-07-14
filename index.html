@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v23 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v24 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -403,6 +403,21 @@ function nearestRingDist(geom, x, y){
   return min;
 }
 
+function parseAreaUnits(str){
+  // HRM stores lot area as ONE text string: "<value> <unit>", e.g.
+  // "345 Square Metres", "1 Square Feet", "0.5 Acres". Parse to m2.
+  if(str == null) return null;
+  var m = String(str).replace(/,/g,"").match(/([\d.]+)\s*(square\s*met|sq\.?\s*m\b|m2|square\s*fe|sq\.?\s*ft|feet|foot|acre|hectare|ha\b)/i);
+  if(!m) return null;
+  var v = parseFloat(m[1]);
+  if(isNaN(v) || v<=0) return null;
+  var u = m[2].toLowerCase();
+  if(/fe|ft|foot/.test(u)) return v * 0.09290304;
+  if(/acre/.test(u))       return v * 4046.8564224;
+  if(/hectare|^ha/.test(u))return v * 10000;
+  return v; // metres
+}
+
 function fetchParcelGeom(x, y){
   // Get the subject parcel polygon at the point (full geometry, for adjacency),
   // and ask the server for the TRUE area in square metres (geodesic), which the
@@ -419,27 +434,27 @@ function fetchParcelGeom(x, y){
     .then(function(d){
       var feats = (d.features||[]).filter(function(f){ return f.geometry && f.geometry.rings; });
       if(!feats.length) return null;
-      var best = null, bestA = Infinity;
+      // Parse each stacked parcel's published area from its AREAUNITS string
+      // ("345 Square Metres", "1 Square Feet", ...). Sliver/placeholder records
+      // (parsed area < 5 m2, like the literal 1-sq-ft parcels) are ignored when
+      // choosing the subject parcel \u2014 they were hijacking the selection.
       feats.forEach(function(f){
+        f._pubM2 = parseAreaUnits(f.attributes && f.attributes.AREAUNITS);
+      });
+      var real = feats.filter(function(f){ return f._pubM2 != null && f._pubM2 >= 5; });
+      var pool = real.length ? real : feats;
+      // Among plausible parcels, keep the smallest-geometry rule (anti-merge).
+      var best = null, bestA = Infinity;
+      pool.forEach(function(f){
         var a = ringAreaM2(f.geometry, y);
         if(a != null && a > 0 && a < bestA){ bestA = a; best = f; }
       });
-      if(!best) best = feats[0];
-      var attrs = best.attributes||{};
-      var pub = null, pubUnit = P.areaFieldUnit || "m2";
-      if(P.areaField && attrs[P.areaField] != null && attrs[P.areaField] !== ""){
-        var raw = Number(attrs[P.areaField]);
-        if(!isNaN(raw) && raw > 0){
-          pub = pubUnit==="ha" ? raw*10000 : pubUnit==="ac" ? raw*4046.8564224 : raw;
-        }
-      }
-      // HRM-published area only. No geometry computation \u2014 the computed
-      // estimate was unreliable, so a blank is preferred over a wrong number.
+      if(!best) best = pool[0];
       return {
         geometry: best.geometry,
-        attrs: attrs,
-        areaM2: pub,                       // null if HRM doesn't publish it
-        areaSource: pub != null ? ("field:"+P.areaField) : "unpublished"
+        attrs: best.attributes||{},
+        areaM2: best._pubM2 != null && best._pubM2 >= 5 ? best._pubM2 : null,
+        areaSource: best._pubM2 != null ? "AREAUNITS" : "unpublished"
       };
     }).catch(function(){ return null; });
 }
@@ -678,9 +693,11 @@ function finish(pt){
     return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y), lookupPublishedArea(pt.x, pt.y, parcel ? parcel.attrs : null)])
       .then(function(extra){
         var pubArea = extra[2];
+        var areaM2 = (parcel && parcel.areaM2 != null) ? parcel.areaM2
+                   : (pubArea ? pubArea.m2 : null);
         renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
-                       parcelArea: pubArea ? pubArea.m2 : null,
-                       areaField: pubArea ? pubArea.field : null,
+                       parcelArea: areaM2,
+                       areaField: (parcel && parcel.areaM2 != null) ? "AREAUNITS" : (pubArea ? pubArea.field : null),
                        apps:extra[1] });
       });
   });
@@ -890,7 +907,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v23)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v24)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
@@ -992,7 +1009,7 @@ function renderAdv(){
   lines.push("geocoder: " + (state.geoOK===null?"probing":state.geoOK?"reachable":"blocked (civic fallback)"));
   lines.push("streets layer: " + (STREETS_SVC||"NOT RESOLVED \u2014 across-road classification off"));
   var pL = CATALOG.find(function(L){ return L.key==="parcel"; });
-  lines.push("area layer: " + (AREA_LAYER ? AREA_LAYER.url + "  field:" + AREA_LAYER.field + " ("+AREA_LAYER.unit+")" : "NOT RESOLVED \u2014 no published area found"));
+  lines.push("lot area source: parcel AREAUNITS string (value+unit parsed)" + (AREA_LAYER ? "; fallback layer: " + AREA_LAYER.url : ""));
   $("adv").textContent = lines.join("\n");
 }
 
