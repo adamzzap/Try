@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v28 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v29 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -419,22 +419,29 @@ function parseAreaUnits(str){
 }
 
 function resolveCivicPID(matchedLabel){
-  // Authoritative PID for the address: match by ADDRESS TEXT on HRM's Civic
-  // Addresses layer (which carries both the address and PID on the same
-  // record) \u2014 zero geometry, zero distance, zero "nearest" guessing. This
-  // is a lookup by key, the same as the query the person already confirmed
-  // works (WHERE PID=...), just keyed on address instead.
+  // Authoritative PID from HRM Civic Addresses. The address is stored SPLIT:
+  //   CIV_NUM (integer), STR_NAME (e.g. "PRINCE ALBERT"), STR_TYPE (e.g. "RD"),
+  //   GSA_NAME (community). FULL_CIVIC holds only the number ("89"), so we must
+  //   match on the parsed number + street name \u2014 a key lookup, no geometry.
   var c = state.civic;
-  if(!c || c.error || !c.pidField || !matchedLabel) return Promise.resolve(null);
-  var addr = String(matchedLabel).split(",")[0].trim().toUpperCase();
-  var fields = c.addrFields.slice(0,3);
-  if(!fields.length) return Promise.resolve(null);
-  var where = fields.map(function(f){ return "UPPER("+f+")='"+esc(addr)+"'"; }).join(" OR ");
+  if(!c || c.error || !matchedLabel) return Promise.resolve(null);
+
+  // Parse "89 PRINCE ALBERT RD, DARTMOUTH" -> num=89, streetwords=[PRINCE,ALBERT,RD]
+  var head = String(matchedLabel).split(",")[0].trim().toUpperCase();
+  var m = head.match(/^(\d+)\s+(.+)$/);
+  if(!m) return Promise.resolve(null);
+  var num = m[1];
+  var rest = m[2].trim();
+  // Drop a trailing street-type token so STR_NAME matches ("PRINCE ALBERT").
+  var TYPES = /\b(RD|ROAD|ST|STREET|AVE|AVENUE|DR|DRIVE|CRES|CRESCENT|BLVD|LANE|LN|CT|COURT|PL|PLACE|WAY|TERR|HWY|PKWY|CIR|CIRCLE)\b\.?$/;
+  var streetName = rest.replace(TYPES, "").trim();
+
+  var where = "CIV_NUM=" + num + " AND UPPER(STR_NAME)='" + esc(streetName) + "'";
   var u = c.url + "/query?where=" + encodeURIComponent(where)
-    + "&outFields=" + c.pidField + "&returnGeometry=false&f=json";
+    + "&outFields=PID,CIV_NUM,STR_NAME&returnGeometry=false&f=json";
   return j(u).then(function(d){
     var f = d.features && d.features[0];
-    return f && f.attributes[c.pidField] ? String(f.attributes[c.pidField]) : null;
+    return f && f.attributes.PID ? String(f.attributes.PID) : null;
   }).catch(function(){ return null; });
 }
 
@@ -990,7 +997,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v28)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v29)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
