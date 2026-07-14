@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v16 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v17 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -366,7 +366,7 @@ function ringAreaM2(geom, yMerc){
   return Math.abs(a/2) * k * k;
 }
 
-function abuttingZones(parcelGeom, ownZone){
+function abuttingZones(parcelGeom, ownZone, px, py){
   // Find every zone polygon that TOUCHES the subject parcel. HRM parcels run to
   // the street centreline, so this also catches parcels across a road. We then
   // classify each: if a street centreline runs between the parcel and the zone,
@@ -385,26 +385,43 @@ function abuttingZones(parcelGeom, ownZone){
   // separates real abutters from parcels across a street.
   var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
     + "&geometryType=esriGeometryPolygon&inSR=102100"
-    + "&spatialRel=esriSpatialRelIntersects&distance=9&units=esriSRUnit_Meter"
+    + "&spatialRel=esriSpatialRelIntersects&distance=20&units=esriSRUnit_Meter"
     + "&outFields=" + zf + "&returnGeometry=true&outSR=102100&f=json";
 
-  return j(Z.url + "/query?" + body).then(function(d){
-    var feats = (d.features||[]).filter(function(f){
-      return f.attributes[zf] && f.attributes[zf] !== ownZone;
-    });
-    if(!feats.length) return {abutters:[], acrossRoad:[], method:"touches"};
-
-    // Fetch street centrelines near the parcel once, then test each zone.
+  function classify(feats){
+    if(!feats.length) return Promise.resolve({abutters:[], acrossRoad:[], method:"none"});
     return fetchStreetsNear(parcelGeom).then(function(streets){
       var abutters = [], across = [];
       feats.forEach(function(f){
         var z = f.attributes[zf];
-        var isAcross = streets && streetBetween(parcelGeom, f.geometry, streets);
+        var isAcross = streets && f.geometry && streetBetween(parcelGeom, f.geometry, streets);
         if(isAcross){ if(across.indexOf(z)<0) across.push(z); }
         else { if(abutters.indexOf(z)<0) abutters.push(z); }
       });
       return { abutters:abutters, acrossRoad:across, method: streets?"classified":"touches-only" };
     });
+  }
+
+  function pointFallback(){
+    if(px==null || py==null) return Promise.resolve({abutters:[], acrossRoad:[], method:"empty"});
+    var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
+    var b2 = "geometry=" + encodeURIComponent(geom)
+      + "&geometryType=esriGeometryPoint&inSR=102100"
+      + "&spatialRel=esriSpatialRelIntersects&distance=20&units=esriSRUnit_Meter"
+      + "&outFields=" + zf + "&returnGeometry=true&outSR=102100&f=json";
+    return j(Z.url + "/query?" + b2).then(function(d2){
+      var fs = (d2.features||[]).filter(function(f){ return f.attributes[zf] && f.attributes[zf]!==ownZone; });
+      return classify(fs).then(function(r){ r.method = "point-fallback"; return r; });
+    }).catch(function(){ return {abutters:[], acrossRoad:[], method:"failed"}; });
+  }
+
+  return j(Z.url + "/query?" + body).then(function(d){
+    var feats = (d.features||[]).filter(function(f){
+      return f.attributes[zf] && f.attributes[zf] !== ownZone;
+    });
+    if(!feats.length) return pointFallback();
+
+    return classify(feats);
   }).catch(function(){ return {abutters:[], acrossRoad:[], method:"failed"}; });
 }
 
@@ -543,7 +560,7 @@ function finish(pt){
     var parcelGeom = parcel ? parcel.geometry : null;
     var zoneHit = hits.find(function(h){ return h.layer.key==="zoning"; });
     var ownZone = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
-    return Promise.all([abuttingZones(parcelGeom, ownZone), nearbyApps(pt.x, pt.y)])
+    return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y)])
       .then(function(extra){
         renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
                        parcelArea:parcel?parcel.areaM2:null, apps:extra[1] });
@@ -752,7 +769,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v16)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v17)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
