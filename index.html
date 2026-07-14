@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v9 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v10 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -289,24 +289,21 @@ function fetchParcelGeom(x, y){
   var geom = JSON.stringify({x:x,y:y,spatialReference:{wkid:102100}});
   var base = P.url + "/query?geometry=" + encodeURIComponent(geom)
     + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects";
-  var geomReq = j(base + "&outFields=*&returnGeometry=true&outSR=102100&f=json")
+  // Return ALL intersecting parcels so we can pick the single smallest one.
+  // HRM stacks overlapping polygons (condo / ROW / assessment); taking the
+  // smallest avoids merging them into one oversized shape.
+  return j(base + "&outFields=*&returnGeometry=true&outSR=102100&f=json")
     .then(function(d){
-      var f = d.features && d.features[0];
-      return f ? { geometry:f.geometry||null, attrs:f.attributes||{} } : null;
+      var feats = (d.features||[]).filter(function(f){ return f.geometry && f.geometry.rings; });
+      if(!feats.length) return null;
+      var best = null, bestA = Infinity;
+      feats.forEach(function(f){
+        var a = ringAreaM2(f.geometry, y);
+        if(a != null && a > 0 && a < bestA){ bestA = a; best = f; }
+      });
+      if(!best) best = feats[0];
+      return { geometry: best.geometry, attrs: best.attributes||{}, areaM2: ringAreaM2(best.geometry, y) };
     }).catch(function(){ return null; });
-  // Server-side geodesic area statistic, in square metres.
-  var areaReq = j(base
-      + "&outStatistics=" + encodeURIComponent(JSON.stringify([
-          {statisticType:"sum", onStatisticField:"1", outStatisticFieldName:"n"}
-        ]))
-      + "&f=json").then(function(){ return null; }).catch(function(){ return null; });
-  return geomReq.then(function(res){
-    if(!res) return null;
-    // Compute planar area from the returned Web Mercator ring, then apply the
-    // latitude scale-factor correction so the figure is true ground m\u00b2.
-    res.areaM2 = ringAreaM2(res.geometry, y);
-    return res;
-  });
 }
 
 // Shoelace area on a Web Mercator ring, corrected for Mercator distortion at
@@ -315,15 +312,14 @@ function ringAreaM2(geom, yMerc){
   if(!geom || !geom.rings || !geom.rings[0]) return null;
   var latlon = mercToLatLon(0, yMerc);
   var k = Math.cos(latlon.lat * Math.PI/180); // scale factor
-  var total = 0;
-  geom.rings.forEach(function(ring){
-    var a = 0;
-    for(var i=0, n=ring.length; i<n-1; i++){
-      a += ring[i][0]*ring[i+1][1] - ring[i+1][0]*ring[i][1];
-    }
-    total += a/2;
-  });
-  return Math.abs(total) * k * k;
+  // Use the outer ring only. Summing multiple rings here previously merged
+  // stacked/overlapping parcels into one inflated area.
+  var ring = geom.rings[0];
+  var a = 0;
+  for(var i=0, n=ring.length; i<n-1; i++){
+    a += ring[i][0]*ring[i+1][1] - ring[i+1][0]*ring[i][1];
+  }
+  return Math.abs(a/2) * k * k;
 }
 
 function abuttingZones(parcelGeom, ownZone){
@@ -336,7 +332,7 @@ function abuttingZones(parcelGeom, ownZone){
   if(parcelGeom){
     var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
       + "&geometryType=esriGeometryPolygon&inSR=102100"
-      + "&spatialRel=esriSpatialRelIntersects"   // intersect = shares area or boundary
+      + "&spatialRel=esriSpatialRelTouches"      // touches = shares only a boundary (true abutter)
       + "&outFields=" + zf + "&returnGeometry=false&returnDistinctValues=true&f=json";
     return j(Z.url + "/query?" + body).then(function(d){
       var zones = (d.features||[]).map(function(f){ return f.attributes[zf]; })
@@ -608,7 +604,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.zones && R.abut.zones.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v9)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v10)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
