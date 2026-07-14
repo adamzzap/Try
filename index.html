@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v18 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v19 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -165,7 +165,7 @@ var CATALOG = [
   { key:"parcel",    svc:"HRM_Parcel_Polygon_with_Accounts",     group:"parcel",    label:"Parcel" }
 ];
 var APPS_SVC = ORG + "/PPLC_Planning_Applications_Geolocated/FeatureServer/0";
-var STREETS_SVC = ORG + "/Street_Centrelines/FeatureServer/0";  // for across-road classification
+var STREETS_SVC = null;  // resolved at boot by scanning the org directory for a street/centreline layer
 
 // Built-form values that are text-only (no GIS layer) — verified entries join by zone.
 var REGS = {
@@ -203,8 +203,16 @@ function j(url){
 // ---------------------------------------------------------------------------
 function boot(){
   setDot("d-layers","wait"); setDot("d-civic","wait"); setDot("d-geo","wait");
-  j(ORG + "?f=json").then(function(){
+  j(ORG + "?f=json").then(function(dir){
     state.network = true;
+    // Resolve the street-centreline service by name (varies: Street_Centrelines,
+    // StreetCentreLines, Road_Segments, etc.) so across-road classification works.
+    try{
+      var svc = (dir.services||[]).find(function(x){
+        return /street.*(centre|center)line|centreline|centerline|road.*seg|street.*seg/i.test(x.name);
+      }) || (dir.services||[]).find(function(x){ return /street|road/i.test(x.name) && /Feature/i.test(x.type); });
+      if(svc) STREETS_SVC = ORG + "/" + svc.name + "/" + svc.type + "/0";
+    }catch(e){}
     return Promise.all(CATALOG.map(prepLayer)).then(function(){
       var ok = CATALOG.filter(function(L){ return L.ok; });
       state.layers = ok;
@@ -401,6 +409,7 @@ function abuttingZones(parcelGeom, ownZone, px, py){
 }
 
 function fetchStreetsNearPoint(px, py){
+  if(!STREETS_SVC) return Promise.resolve(null);
   var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
   var body = "geometry=" + encodeURIComponent(geom)
     + "&geometryType=esriGeometryPoint&inSR=102100"
@@ -750,7 +759,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v18)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v19)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
@@ -848,6 +857,7 @@ function renderAdv(){
   lines.push("");
   lines.push("civic: " + (c.url ? "ok  PID:"+(c.pidField||"?")+"  addr:"+((c.addrFields||[]).join(",")||"?") : (c.error||"?")));
   lines.push("geocoder: " + (state.geoOK===null?"probing":state.geoOK?"reachable":"blocked (civic fallback)"));
+  lines.push("streets layer: " + (STREETS_SVC||"NOT RESOLVED \u2014 across-road classification off"));
   $("adv").textContent = lines.join("\n");
 }
 
