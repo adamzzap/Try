@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v22 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v23 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -242,8 +242,8 @@ function discoverAreaLayer(dir){
   // layer whose fields include a published lot-area size (field name or alias
   // like "Area (lot) Size", AREASZ, LOT_SIZE, AREA_SQM, etc.).
   var svcs = (dir.services||[]).filter(function(x){
-    return /parcel|propert|assess|account|pvsc|boundary/i.test(x.name) && /Feature|Map/i.test(x.type);
-  }).slice(0, 8);
+    return /parcel|propert|assess|account|pvsc|boundary|aan|valuation/i.test(x.name) && /Feature|Map/i.test(x.type);
+  }).slice(0, 12);
   var areaRe = /AREA.?LOT|LOT.?AREA|AREA.?SIZE|AREASZ|AREA_?SQM|LOT.?SIZE|LAND.?SIZE|LND.?AREA|PARCEL.?AREA|GIS.?AREA|SIZE.?SQM|^AREA$|AREA_M/i;
   var aliasRe = /area\s*\(?lot\)?\s*size|lot\s*size|area\s*size|parcel\s*area|lot\s*area/i;
   var chain = Promise.resolve();
@@ -261,16 +261,17 @@ function discoverAreaLayer(dir){
             return j(lurl + "?f=json").then(function(lm){
               var fields = lm.fields||[];
               var hit = fields.find(function(f){
+                // NUMERIC area value field only; exclude AREAUNITS (text) and Shape__Area.
                 return (areaRe.test(f.name||"") || aliasRe.test(f.alias||""))
-                  && /Double|Integer|Single|Small|String/i.test(f.type)
-                  && !/SHAPE__|ST_?AREA/i.test(f.name||"");
+                  && /Double|Integer|Single|Small/i.test(f.type)
+                  && !/SHAPE__|ST_?AREA|AREAUNIT/i.test(f.name||"");
               });
-              // require a PID or AAN key so we can match the subject parcel
-              var key = fields.find(function(f){ return /^PID$|PID_|^AAN$|ACCOUNT|ASSESS.?ACC/i.test(f.name||""); });
-              if(hit){
+              var key = fields.find(function(f){ return /^AAN$|ASSESS.?ACC|ACCOUNT/i.test(f.name||""); })
+                     || fields.find(function(f){ return /^PID$/i.test(f.name||""); });
+              if(hit && key){
                 var unit = /HECTARE/i.test(hit.name)?"ha":/ACRE/i.test(hit.name)?"ac":"m2";
                 AREA_LAYER = { url:lurl, field:hit.name, alias:hit.alias||hit.name, unit:unit,
-                               keyField: key?key.name:null };
+                               keyField: key.name };
               }
             }).catch(function(){});
           });
@@ -624,19 +625,41 @@ function pickLabel(attrs){
   return null;
 }
 
-function lookupPublishedArea(px, py){
+function lookupPublishedArea(px, py, parcelAttrs){
   if(!AREA_LAYER) return Promise.resolve(null);
-  var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
-  var u = AREA_LAYER.url + "/query?geometry=" + encodeURIComponent(geom)
-    + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects"
-    + "&outFields=" + encodeURIComponent(AREA_LAYER.field + (AREA_LAYER.keyField?","+AREA_LAYER.keyField:""))
-    + "&returnGeometry=false&f=json";
-  return j(u).then(function(d){
+  // Prefer a key JOIN (AAN or PID from the subject parcel) over a spatial query \u2014
+  // the area lives on an assessment layer keyed by AAN, not on the parcel polygon.
+  var kf = AREA_LAYER.keyField;
+  var keyVal = null;
+  if(parcelAttrs && kf){
+    if(kf.toUpperCase()==="AAN" && parcelAttrs.AAN) keyVal = parcelAttrs.AAN;
+    else if(kf.toUpperCase()==="PID" && parcelAttrs.PID) keyVal = parcelAttrs.PID;
+    else if(parcelAttrs[kf]) keyVal = parcelAttrs[kf];
+  }
+  var outF = encodeURIComponent(AREA_LAYER.field + (kf?","+kf:"") + ",AREAUNITS");
+  var url;
+  if(keyVal != null){
+    url = AREA_LAYER.url + "/query?where=" + encodeURIComponent(kf + "='" + String(keyVal).replace(/'/g,"''") + "'")
+      + "&outFields=" + outF + "&returnGeometry=false&f=json";
+  } else {
+    var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
+    url = AREA_LAYER.url + "/query?geometry=" + encodeURIComponent(geom)
+      + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects"
+      + "&outFields=" + outF + "&returnGeometry=false&f=json";
+  }
+  return j(url).then(function(d){
     var f = d.features && d.features[0];
     if(!f) return null;
     var raw = Number(f.attributes[AREA_LAYER.field]);
     if(isNaN(raw) || raw<=0) return null;
-    var m2 = AREA_LAYER.unit==="ha"?raw*10000:AREA_LAYER.unit==="ac"?raw*4046.8564224:raw;
+    // Respect a per-record AREAUNITS text if present (e.g. "Square Feet").
+    var unit = AREA_LAYER.unit;
+    var au = (f.attributes.AREAUNITS||"").toString().toLowerCase();
+    if(/feet|foot|sq\s*ft/.test(au)) unit = "ft2";
+    else if(/hectare/.test(au)) unit = "ha";
+    else if(/acre/.test(au)) unit = "ac";
+    else if(/metre|meter/.test(au)) unit = "m2";
+    var m2 = unit==="ha"?raw*10000:unit==="ac"?raw*4046.8564224:unit==="ft2"?raw*0.09290304:raw;
     return { m2:m2, field:AREA_LAYER.alias||AREA_LAYER.field };
   }).catch(function(){ return null; });
 }
@@ -652,7 +675,7 @@ function finish(pt){
     var parcelGeom = parcel ? parcel.geometry : null;
     var zoneHit = hits.find(function(h){ return h.layer.key==="zoning"; });
     var ownZone = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
-    return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y), lookupPublishedArea(pt.x, pt.y)])
+    return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y), lookupPublishedArea(pt.x, pt.y, parcel ? parcel.attrs : null)])
       .then(function(extra){
         var pubArea = extra[2];
         renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
@@ -867,7 +890,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v22)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v23)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
