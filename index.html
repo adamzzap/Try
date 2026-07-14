@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v30 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v31 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -603,25 +603,34 @@ function fetchStreetsNearPoint(px, py){
 // Simple robust proxy: a centreline vertex within ~10 m of BOTH the point and
 // the zone polygon edge means the road runs along their shared frontage.
 function streetBetweenPoint(px, py, zoneGeom, streets){
-  var NEAR = 12, near2 = NEAR*NEAR;
+  // A zone is "across the road" if a street centreline runs between the site
+  // point and that zone. HRM street segments are long polylines with sparse
+  // vertices, so we SAMPLE points densely along each segment (not just its
+  // vertices) and test whether any sample sits close to both the site point and
+  // the candidate zone's edge \u2014 i.e. the road lies between them.
+  var NEAR = 14, near2 = NEAR*NEAR;   // metres tolerance to point and to zone edge
+  var STEP = 4;                        // sample the centreline every ~4 m
   if(!zoneGeom || !zoneGeom.rings) return false;
   for(var s=0;s<streets.length;s++){
-    var paths = streets[s].paths || [];
+    var paths = (streets[s] && streets[s].paths) || [];
     for(var p=0;p<paths.length;p++){
       var pts = paths[p];
-      for(var i=0;i<pts.length;i++){
-        var x=pts[i][0], y=pts[i][1];
-        var dPt = (x-px)*(x-px) + (y-py)*(y-py);
-        if(dPt < near2 && distToRings(x,y,zoneGeom.rings) < near2) return true;
+      for(var i=0;i<pts.length-1;i++){
+        var ax=pts[i][0], ay=pts[i][1], bx=pts[i+1][0], by=pts[i+1][1];
+        var segLen = Math.sqrt((bx-ax)*(bx-ax)+(by-ay)*(by-ay)) || 0;
+        var n = Math.max(1, Math.ceil(segLen/STEP));
+        for(var k=0;k<=n;k++){
+          var t = k/n;
+          var x = ax + (bx-ax)*t, y = ay + (by-ay)*t;
+          var dPt = (x-px)*(x-px) + (y-py)*(y-py);
+          if(dPt < near2 && distToRings(x,y,zoneGeom.rings) < near2) return true;
+        }
       }
     }
   }
   return false;
 }
 
-
-// True if any street centreline passes between the parcel and the zone polygon:
-// i.e. a street vertex lies close to BOTH the parcel edge and the zone edge.
 function distToRings(x,y,rings){
   var min = Infinity;
   for(var r=0;r<rings.length;r++){
@@ -1002,7 +1011,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v30)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v31)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
