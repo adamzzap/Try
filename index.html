@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v12 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v14 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -132,7 +132,7 @@ var APPS_BUFFER_M = 150;  // nearby planning applications radius
 var CATALOG = [
   { key:"zoning",    svc:"ZoningBoundaries",                     group:"zone",      label:"Zone (adopted LUB)", hi:/^ZONE$/i },
 
-  { key:"maxhgt",    svc:"Maximum_Building_Heights",             group:"builtform", label:"Sched 15 \u2014 Max building height (m)", hi:/HGT|HEIGHT/i },
+  { key:"maxhgt",    svc:"Maximum_Building_Heights",             group:"builtform", label:"Sched 15 \u2014 Max building height", hi:/MAXBLDHGT/i, heightLayer:true, multi:true },
   { key:"prebonus",  svc:"Pre_Bonus_Building_Height",            group:"builtform", label:"Pre-bonus height (downtown)", hi:/HGT|HEIGHT/i },
   { key:"postbonus", svc:"Post_Bonus_Building_Height",           group:"builtform", label:"Post-bonus height (downtown)", hi:/HGT|HEIGHT/i },
   { key:"far",       svc:"RC_Maximum_Floor_Area_Ratio",          group:"builtform", label:"Sched 17 \u2014 Max floor area ratio", hi:/FAR|RATIO/i },
@@ -272,6 +272,15 @@ function queryLayer(L, x, y){
   // truly falls inside \u2014 critical near zone boundaries (e.g. COR abutting
   // Downtown Dartmouth), where a buffer would wrongly catch the neighbour.
   return j(pointQueryUrl(L.url, x, y)).then(function(d){
+    if(L.multi){
+      var fs = (d.features||[]);
+      if(fs.length) return {layer:L, features:fs, buffered:false};
+      // fall through to buffered multi below
+      return j(pointQueryUrl(L.url, x, y, L.buffer || BUFFER_M)).then(function(d2){
+        var fs2 = (d2.features||[]);
+        return fs2.length ? {layer:L, features:fs2, buffered:true} : null;
+      }).catch(function(){ return null; });
+    }
     var f = d.features && d.features[0];
     if(f) return {layer:L, attrs:f.attributes, buffered:false};
 
@@ -545,7 +554,38 @@ function attrTable(attrs){
     return '<div class="attr"><span class="k">'+escH(kv[0])+'</span><span class="v">'+escH(kv[1])+'</span></div>';
   }).join("");
 }
+function heightCard(h){
+  // HRM is migrating height controls from metres to storeys. Rule:
+  //   - if a max-storey count (CDMBS / MAXBLDSTRY) exists at the point, that is
+  //     the governing control; the metres figure is legacy and superseded.
+  //   - use max height in metres (CDMBH / MAXBLDHGT) ONLY where no storey count
+  //     is established.
+  var feats = (h.features||[]).map(function(f){ return f.attributes; });
+  var storeyRec = feats.find(function(a){ return a.MAXBLDSTRY!=null; });
+  var metreRec  = feats.find(function(a){ return a.MAXBLDHGT!=null; });
+  h._resolved = { storeys: storeyRec?storeyRec.MAXBLDSTRY:null,
+                  metres: metreRec?metreRec.MAXBLDHGT:null };
+
+  var valHtml, note;
+  if(storeyRec){
+    valHtml = '<div class="hit-val">'+escH(storeyRec.MAXBLDSTRY)+' storeys</div>';
+    note = metreRec
+      ? '<div class="hit-note">Governing control: max storeys (HRM\u2019s current method). A legacy '+escH(metreRec.MAXBLDHGT)+' m figure also maps here but is superseded where a storey count is set \u2014 confirm on Sched 15.</div>'
+      : '<div class="hit-note">Max storeys \u2014 HRM\u2019s current height method. GIS-read; confirm on Sched 15.</div>';
+  } else if(metreRec){
+    valHtml = '<div class="hit-val">'+escH(metreRec.MAXBLDHGT)+' m</div>';
+    note = '<div class="hit-note">Max height in metres (no storey count established at this point). GIS-read; confirm on Sched 15.</div>';
+  } else {
+    valHtml = '<div class="muted">No height or storey value returned.</div>';
+    note = "";
+  }
+  return '<div class="hit"><div class="hit-label">'+escH(h.layer.label)
+    + (h.buffered?' <span class="hit-note">(nearest)</span>':'') + '</div>'
+    + valHtml + note + '</div>';
+}
+
 function hitCard(h){
+  if(h.features) return heightCard(h);
   var headline = h.layer.hiField && h.attrs[h.layer.hiField] != null
     ? '<div class="hit-val">'+escH(h.attrs[h.layer.hiField])+'</div>' : "";
   var rest = cleanAttrs(h.attrs).filter(function(kv){ return kv[0] !== h.layer.hiField; });
@@ -661,7 +701,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.zones && R.abut.zones.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v12)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v14)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
@@ -675,6 +715,18 @@ function copyCutSheet(){
   var bf = hitsBy("builtform");
   if(bf.length){
     bf.forEach(function(h){
+      if(h.features){
+        var fs = h.features.map(function(f){ return f.attributes; });
+        var ms = fs.find(function(a){ return a.MAXBLDSTRY!=null; });
+        var mh = fs.find(function(a){ return a.MAXBLDHGT!=null; });
+        var val, tag = "";
+        if(ms){ val = ms.MAXBLDSTRY + " storeys";
+                if(mh) tag = "  [legacy " + mh.MAXBLDHGT + " m superseded by storey count; VERIFY on Sched 15]"; }
+        else if(mh){ val = mh.MAXBLDHGT + " m  [no storey count established at this point]"; }
+        else { val = "(no value)"; }
+        t += "- " + h.layer.label + ": " + val + tag + "\n";
+        return;
+      }
       var v = h.layer.hiField && h.attrs[h.layer.hiField]!=null ? h.attrs[h.layer.hiField] : "(see attributes)";
       t += "- " + h.layer.label + ": " + v + (h.buffered?"  [within "+(h.layer.buffer||BUFFER_M)+" m of point \u2014 corner lots may carry two frontage values; VERIFY]":"") + "\n";
     });
