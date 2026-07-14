@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v17 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v18 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -367,94 +367,75 @@ function ringAreaM2(geom, yMerc){
 }
 
 function abuttingZones(parcelGeom, ownZone, px, py){
-  // Find every zone polygon that TOUCHES the subject parcel. HRM parcels run to
-  // the street centreline, so this also catches parcels across a road. We then
-  // classify each: if a street centreline runs between the parcel and the zone,
-  // it is "across the road" (reported, but flagged not-applicable); otherwise it
-  // is a true property-line abutter.
+  // Point-based 30 m scan (this path reliably returns neighbours, unlike the
+  // parcel-polygon query). Each differing zone is then classified: if a street
+  // centreline runs between it and the site, it's "across the road" (flagged,
+  // not applicable); otherwise it's a true abutter.
   var Z = CATALOG.find(function(L){ return L.key==="zoning" && L.ok; });
-  if(!Z) return Promise.resolve({abutters:[], acrossRoad:[], method:"none"});
+  if(!Z || px==null || py==null) return Promise.resolve({abutters:[], acrossRoad:[], method:"none"});
   var zf = Z.hiField || "ZONE";
-  if(!parcelGeom || !parcelGeom.rings){
-    return Promise.resolve({abutters:[], acrossRoad:[], method:"noparcel"});
-  }
-
-  // 9 m intersect-buffer around the parcel: reliably catches true side/rear
-  // neighbours across small GIS edge-gaps without reaching a second lot deep
-  // (lots are rarely narrower than ~9 m). Road classification below then
-  // separates real abutters from parcels across a street.
-  var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
-    + "&geometryType=esriGeometryPolygon&inSR=102100"
-    + "&spatialRel=esriSpatialRelIntersects&distance=20&units=esriSRUnit_Meter"
+  var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
+  var body = "geometry=" + encodeURIComponent(geom)
+    + "&geometryType=esriGeometryPoint&inSR=102100"
+    + "&spatialRel=esriSpatialRelIntersects&distance=30&units=esriSRUnit_Meter"
     + "&outFields=" + zf + "&returnGeometry=true&outSR=102100&f=json";
-
-  function classify(feats){
-    if(!feats.length) return Promise.resolve({abutters:[], acrossRoad:[], method:"none"});
-    return fetchStreetsNear(parcelGeom).then(function(streets){
-      var abutters = [], across = [];
-      feats.forEach(function(f){
-        var z = f.attributes[zf];
-        var isAcross = streets && f.geometry && streetBetween(parcelGeom, f.geometry, streets);
-        if(isAcross){ if(across.indexOf(z)<0) across.push(z); }
-        else { if(abutters.indexOf(z)<0) abutters.push(z); }
-      });
-      return { abutters:abutters, acrossRoad:across, method: streets?"classified":"touches-only" };
-    });
-  }
-
-  function pointFallback(){
-    if(px==null || py==null) return Promise.resolve({abutters:[], acrossRoad:[], method:"empty"});
-    var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
-    var b2 = "geometry=" + encodeURIComponent(geom)
-      + "&geometryType=esriGeometryPoint&inSR=102100"
-      + "&spatialRel=esriSpatialRelIntersects&distance=20&units=esriSRUnit_Meter"
-      + "&outFields=" + zf + "&returnGeometry=true&outSR=102100&f=json";
-    return j(Z.url + "/query?" + b2).then(function(d2){
-      var fs = (d2.features||[]).filter(function(f){ return f.attributes[zf] && f.attributes[zf]!==ownZone; });
-      return classify(fs).then(function(r){ r.method = "point-fallback"; return r; });
-    }).catch(function(){ return {abutters:[], acrossRoad:[], method:"failed"}; });
-  }
 
   return j(Z.url + "/query?" + body).then(function(d){
     var feats = (d.features||[]).filter(function(f){
       return f.attributes[zf] && f.attributes[zf] !== ownZone;
     });
-    if(!feats.length) return pointFallback();
+    if(!feats.length) return {abutters:[], acrossRoad:[], method:"none"};
 
-    return classify(feats);
+    // Classify each differing zone by whether a street sits between it and the point.
+    return fetchStreetsNearPoint(px, py).then(function(streets){
+      var abutters = [], across = [];
+      feats.forEach(function(f){
+        var z = f.attributes[zf];
+        var isAcross = streets && streetBetweenPoint(px, py, f.geometry, streets);
+        if(isAcross){ if(across.indexOf(z)<0) across.push(z); }
+        else { if(abutters.indexOf(z)<0) abutters.push(z); }
+      });
+      return { abutters:abutters, acrossRoad:across, method: streets?"classified":"unclassified" };
+    });
   }).catch(function(){ return {abutters:[], acrossRoad:[], method:"failed"}; });
 }
 
-function fetchStreetsNear(parcelGeom){
-  // Streets within a small envelope of the parcel (buffered query on the line layer).
-  var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
-    + "&geometryType=esriGeometryPolygon&inSR=102100"
-    + "&spatialRel=esriSpatialRelIntersects&distance=25&units=esriSRUnit_Meter"
+function fetchStreetsNearPoint(px, py){
+  var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
+  var body = "geometry=" + encodeURIComponent(geom)
+    + "&geometryType=esriGeometryPoint&inSR=102100"
+    + "&spatialRel=esriSpatialRelIntersects&distance=40&units=esriSRUnit_Meter"
     + "&outFields=OBJECTID&returnGeometry=true&outSR=102100&f=json";
   return j(STREETS_SVC + "/query?" + body).then(function(d){
     return (d.features||[]).map(function(f){ return f.geometry; }).filter(Boolean);
-  }).catch(function(){ return null; });  // null = couldn't classify
+  }).catch(function(){ return null; });
 }
 
-// True if any street centreline passes between the parcel and the zone polygon:
-// i.e. a street vertex lies close to BOTH the parcel edge and the zone edge.
-function streetBetween(parcelGeom, zoneGeom, streets){
-  var NEAR = 8; // metres: a centreline within ~6 m of both boundaries sits in the road between them
-  var near2 = NEAR*NEAR;
+// A zone is "across the road" if a street centreline passes between the site
+// point and that zone: i.e. some centreline vertex lies between the point and
+// the zone \u2014 close to the zone's edge AND with the point on the opposite side.
+// Simple robust proxy: a centreline vertex within ~10 m of BOTH the point and
+// the zone polygon edge means the road runs along their shared frontage.
+function streetBetweenPoint(px, py, zoneGeom, streets){
+  var NEAR = 12, near2 = NEAR*NEAR;
+  if(!zoneGeom || !zoneGeom.rings) return false;
   for(var s=0;s<streets.length;s++){
     var paths = streets[s].paths || [];
     for(var p=0;p<paths.length;p++){
       var pts = paths[p];
       for(var i=0;i<pts.length;i++){
         var x=pts[i][0], y=pts[i][1];
-        if(distToRings(x,y,parcelGeom.rings) < near2 && distToRings(x,y,zoneGeom.rings||[]) < near2){
-          return true;
-        }
+        var dPt = (x-px)*(x-px) + (y-py)*(y-py);
+        if(dPt < near2 && distToRings(x,y,zoneGeom.rings) < near2) return true;
       }
     }
   }
   return false;
 }
+
+
+// True if any street centreline passes between the parcel and the zone polygon:
+// i.e. a street vertex lies close to BOTH the parcel edge and the zone edge.
 function distToRings(x,y,rings){
   var min = Infinity;
   for(var r=0;r<rings.length;r++){
@@ -769,7 +750,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v17)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v18)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
