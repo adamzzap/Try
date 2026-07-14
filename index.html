@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v14 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v15 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -165,6 +165,7 @@ var CATALOG = [
   { key:"parcel",    svc:"HRM_Parcel_Polygon_with_Accounts",     group:"parcel",    label:"Parcel" }
 ];
 var APPS_SVC = ORG + "/PPLC_Planning_Applications_Geolocated/FeatureServer/0";
+var STREETS_SVC = ORG + "/Street_Centrelines/FeatureServer/0";  // for across-road classification
 
 // Built-form values that are text-only (no GIS layer) — verified entries join by zone.
 var REGS = {
@@ -365,52 +366,84 @@ function ringAreaM2(geom, yMerc){
   return Math.abs(a/2) * k * k;
 }
 
-function shrinkPolygon(geom, metres){
-  // Pull each vertex toward the ring centroid by ~metres. Approximate but
-  // enough to clear a street-centerline contact while preserving side/rear
-  // adjacency. Returns a geometry usable as a query input.
-  if(!geom || !geom.rings || !geom.rings.length) return null;
-  var out = { rings: [], spatialReference:{wkid:102100} };
-  geom.rings.forEach(function(ring){
-    // centroid of this ring
-    var cx=0, cy=0, n=ring.length;
-    ring.forEach(function(p){ cx+=p[0]; cy+=p[1]; });
-    cx/=n; cy/=n;
-    var pulled = ring.map(function(p){
-      var dx = cx-p[0], dy = cy-p[1];
-      var len = Math.sqrt(dx*dx+dy*dy) || 1;
-      var f = Math.min(metres, len*0.45) / len;  // never collapse past ~centre
-      return [ p[0] + dx*f, p[1] + dy*f ];
-    });
-    out.rings.push(pulled);
-  });
-  return out;
-}
-
 function abuttingZones(parcelGeom, ownZone){
-  // True abutters share the subject's PROPERTY line. HRM parcels run to the
-  // street centerline, so a plain "touches" wrongly catches parcels across the
-  // road. Fix: shrink the parcel inward, then test zones within a small collar
-  // around the shrunk shape \u2014 hugs the property line, can't cross a street.
+  // Find every zone polygon that TOUCHES the subject parcel. HRM parcels run to
+  // the street centreline, so this also catches parcels across a road. We then
+  // classify each: if a street centreline runs between the parcel and the zone,
+  // it is "across the road" (reported, but flagged not-applicable); otherwise it
+  // is a true property-line abutter.
   var Z = CATALOG.find(function(L){ return L.key==="zoning" && L.ok; });
-  if(!Z) return Promise.resolve({zones:[], method:"none"});
+  if(!Z) return Promise.resolve({abutters:[], acrossRoad:[], method:"none"});
   var zf = Z.hiField || "ZONE";
   if(!parcelGeom || !parcelGeom.rings){
-    return Promise.resolve({zones:[], method:"noparcel"});
+    return Promise.resolve({abutters:[], acrossRoad:[], method:"noparcel"});
   }
-  var shrunk = shrinkPolygon(parcelGeom, 2.5);
-  if(!shrunk) return Promise.resolve({zones:[], method:"noparcel"});
 
-  var body = "geometry=" + encodeURIComponent(JSON.stringify(shrunk))
+  var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
     + "&geometryType=esriGeometryPolygon&inSR=102100"
-    + "&spatialRel=esriSpatialRelIntersects"
-    + "&distance=3&units=esriSRUnit_Meter"      // ~3 m collar around shrunk parcel
-    + "&outFields=" + zf + "&returnGeometry=false&returnDistinctValues=true&f=json";
+    + "&spatialRel=esriSpatialRelTouches"
+    + "&outFields=" + zf + "&returnGeometry=true&outSR=102100&f=json";
+
   return j(Z.url + "/query?" + body).then(function(d){
-    var zones = (d.features||[]).map(function(f){ return f.attributes[zf]; })
-      .filter(function(z){ return z && z !== ownZone; });
-    return { zones: Array.from(new Set(zones)), method:"collar" };
-  }).catch(function(){ return {zones:[], method:"failed"}; });
+    var feats = (d.features||[]).filter(function(f){
+      return f.attributes[zf] && f.attributes[zf] !== ownZone;
+    });
+    if(!feats.length) return {abutters:[], acrossRoad:[], method:"touches"};
+
+    // Fetch street centrelines near the parcel once, then test each zone.
+    return fetchStreetsNear(parcelGeom).then(function(streets){
+      var abutters = [], across = [];
+      feats.forEach(function(f){
+        var z = f.attributes[zf];
+        var isAcross = streets && streetBetween(parcelGeom, f.geometry, streets);
+        if(isAcross){ if(across.indexOf(z)<0) across.push(z); }
+        else { if(abutters.indexOf(z)<0) abutters.push(z); }
+      });
+      return { abutters:abutters, acrossRoad:across, method: streets?"classified":"touches-only" };
+    });
+  }).catch(function(){ return {abutters:[], acrossRoad:[], method:"failed"}; });
+}
+
+function fetchStreetsNear(parcelGeom){
+  // Streets within a small envelope of the parcel (buffered query on the line layer).
+  var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
+    + "&geometryType=esriGeometryPolygon&inSR=102100"
+    + "&spatialRel=esriSpatialRelIntersects&distance=25&units=esriSRUnit_Meter"
+    + "&outFields=OBJECTID&returnGeometry=true&outSR=102100&f=json";
+  return j(STREETS_SVC + "/query?" + body).then(function(d){
+    return (d.features||[]).map(function(f){ return f.geometry; }).filter(Boolean);
+  }).catch(function(){ return null; });  // null = couldn't classify
+}
+
+// True if any street centreline passes between the parcel and the zone polygon:
+// i.e. a street vertex lies close to BOTH the parcel edge and the zone edge.
+function streetBetween(parcelGeom, zoneGeom, streets){
+  var NEAR = 6; // metres: a centreline within ~6 m of both boundaries sits in the road between them
+  var near2 = NEAR*NEAR;
+  for(var s=0;s<streets.length;s++){
+    var paths = streets[s].paths || [];
+    for(var p=0;p<paths.length;p++){
+      var pts = paths[p];
+      for(var i=0;i<pts.length;i++){
+        var x=pts[i][0], y=pts[i][1];
+        if(distToRings(x,y,parcelGeom.rings) < near2 && distToRings(x,y,zoneGeom.rings||[]) < near2){
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+function distToRings(x,y,rings){
+  var min = Infinity;
+  for(var r=0;r<rings.length;r++){
+    var ring = rings[r];
+    for(var i=0;i<ring.length;i++){
+      var dx=ring[i][0]-x, dy=ring[i][1]-y, d=dx*dx+dy*dy;
+      if(d<min) min=d;
+    }
+  }
+  return min;
 }
 
 function nearbyApps(x, y){
@@ -562,16 +595,17 @@ function heightCard(h){
   //     is established.
   var feats = (h.features||[]).map(function(f){ return f.attributes; });
   var storeyRec = feats.find(function(a){ return a.MAXBLDSTRY!=null; });
-  var metreRec  = feats.find(function(a){ return a.MAXBLDHGT!=null; });
+  // Only consider a metres value if NO storey count exists at the point. This
+  // also prevents an overlapping neighbouring precinct (e.g. a downtown 90 m
+  // polygon) from surfacing on a site whose control is expressed in storeys.
+  var metreRec  = storeyRec ? null : feats.find(function(a){ return a.MAXBLDHGT!=null; });
   h._resolved = { storeys: storeyRec?storeyRec.MAXBLDSTRY:null,
                   metres: metreRec?metreRec.MAXBLDHGT:null };
 
   var valHtml, note;
   if(storeyRec){
     valHtml = '<div class="hit-val">'+escH(storeyRec.MAXBLDSTRY)+' storeys</div>';
-    note = metreRec
-      ? '<div class="hit-note">Governing control: max storeys (HRM\u2019s current method). A legacy '+escH(metreRec.MAXBLDHGT)+' m figure also maps here but is superseded where a storey count is set \u2014 confirm on Sched 15.</div>'
-      : '<div class="hit-note">Max storeys \u2014 HRM\u2019s current height method. GIS-read; confirm on Sched 15.</div>';
+    note = '<div class="hit-note">Max storeys \u2014 HRM\u2019s current height method. GIS-read; confirm on Sched 15.</div>';
   } else if(metreRec){
     valHtml = '<div class="hit-val">'+escH(metreRec.MAXBLDHGT)+' m</div>';
     note = '<div class="hit-note">Max height in metres (no storey count established at this point). GIS-read; confirm on Sched 15.</div>';
@@ -638,15 +672,28 @@ function renderResult(R){
   var cx = byGroup("context");
   var cxHtml = cx.length ? cx.map(hitCard).join("") : '<div class="muted">No plan-context polygons returned.</div>';
 
-var abut = R.abut || {zones:[], method:"none"};
+var abut = R.abut || {abutters:[], acrossRoad:[], method:"none"};
   var abutHtml;
   if(!R.hasParcel){
     abutHtml = '<div class="muted" style="color:#A9791B">Subject parcel polygon not found \u2014 abutting-zone check unavailable. Confirm abutters from the zoning screenshot.</div>';
-  } else if(abut.zones.length){
-    abutHtml = abut.zones.map(function(z){ return '<span class="chip">'+escH(z)+'</span>'; }).join("")
-      + '<div class="muted">Zones sharing a boundary with the subject parcel (true abutters). Per-lot-line side (front/rear/left/right) still to be read from the zoning screenshot.</div>';
   } else {
-    abutHtml = '<div class="muted">All parcels abutting this lot carry the same zone \u2014 no differing abutting zone. No Table 14 buffer triggered on zoning grounds.</div>';
+    var parts = "";
+    if(abut.abutters && abut.abutters.length){
+      parts += abut.abutters.map(function(z){ return '<span class="chip">'+escH(z)+'</span>'; }).join("")
+        + '<div class="muted">Differing zone(s) sharing this lot\u2019s property line (true abutters). May trigger Table 14 buffer / side-setback / stepback \u2014 confirm per-lot-line on the zoning screenshot.</div>';
+    }
+    if(abut.acrossRoad && abut.acrossRoad.length){
+      parts += abut.acrossRoad.map(function(z){
+        return '<span class="chip" style="background:#EEE;color:#5B6A74">'+escH(z)+'</span>';
+      }).join("")
+        + '<div class="muted">Across the road \u2014 not applicable. Separated from the subject parcel by a street; does not abut for buffer/setback purposes.</div>';
+    }
+    if(!parts){
+      parts = (abut.method==="touches-only")
+        ? '<div class="muted">Touching zones found but the street layer couldn\u2019t be read to classify them \u2014 confirm abutters from the zoning screenshot.</div>'
+        : '<div class="muted">All parcels abutting this lot carry the same zone \u2014 no differing abutting zone. No Table 14 buffer triggered on zoning grounds.</div>';
+    }
+    abutHtml = parts;
   }
 
   var appsHtml;
@@ -698,10 +745,10 @@ function copyCutSheet(){
   var zoneHit = hitsBy("zone")[0];
   var zoneVal = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
   var pid = state.civic && state.civic.pidField && R.pt.attrs ? R.pt.attrs[state.civic.pidField] : null;
-  var boundary = (R.abut && R.abut.zones && R.abut.zones.length) ? true : false;
+  var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v14)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v15)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
@@ -757,9 +804,16 @@ function copyCutSheet(){
   });
   t += "\n";
 
-  var abut = R.abut || {zones:[]};
-  var hasAbut = abut.zones && abut.zones.length;
-  t += "ABUTTING ZONES (share a boundary with subject parcel): " + (R.hasParcel ? (hasAbut ? abut.zones.join(", ") : "none differing \u2014 all abutters same zone") : "parcel geometry unavailable \u2014 read from screenshot") + "\n";
+  var abut = R.abut || {abutters:[], acrossRoad:[]};
+  var hasAbut = abut.abutters && abut.abutters.length;
+  if(!R.hasParcel){
+    t += "ABUTTING ZONES: parcel geometry unavailable \u2014 read from screenshot\n";
+  } else {
+    t += "ABUTTING ZONES (share property line): " + (hasAbut ? abut.abutters.join(", ") : "none differing \u2014 all abutters same zone") + "\n";
+    if(abut.acrossRoad && abut.acrossRoad.length){
+      t += "  across the road (not applicable): " + abut.acrossRoad.join(", ") + "\n";
+    }
+  }
   if(R.apps && R.apps.length){
     t += "NEARBY APPLICATIONS (" + APPS_BUFFER_M + " m): " + R.apps.length + " \u2014 see tool output\n";
   }
