@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v19 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v21 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -239,6 +239,29 @@ function prepLayer(L){
   L.url = ORG + "/" + L.svc + "/FeatureServer/" + (L.layerId!=null ? L.layerId : 0);
   return j(L.url + "?f=json").then(function(meta){
     L.fields = (meta.fields||[]).map(function(f){ return f.name; });
+    L.fieldMeta = (meta.fields||[]);
+    if(L.key === "parcel"){
+      // Find a PUBLISHED area field (not the raw Shape__Area system field).
+      // Prefer explicit square-metre/area fields; capture units where derivable.
+      var cand = (meta.fields||[]).filter(function(f){
+        var n = f.name.toUpperCase();
+        if(/SHAPE__|SHAPE\.|ST_?AREA|STLENGTH/.test(n)) return false;
+        return /(^|_)AREA($|_)|AREA_?SQM|SQ_?M|SQM|LOT_?AREA|LAND_?AREA|PARCEL_?AREA|CALC_?AREA|STATED_?AREA|MAP_?AREA|(^|_)SIZE($|_)|HECTARE|ACRE/.test(n)
+          && /Double|Integer|Single|Small/i.test(f.type);
+      });
+      // Rank: prefer names containing AREA + metric hints.
+      cand.sort(function(a,b){
+        function score(n){ n=n.toUpperCase(); var s=0;
+          if(/SQM|SQ_?M|_M2|AREA_?SQM/.test(n)) s+=3;
+          if(/AREA/.test(n)) s+=2;
+          if(/HECTARE|ACRE/.test(n)) s-=1;   // convertible but not m2
+          return s; }
+        return score(b.name)-score(a.name);
+      });
+      L.areaField = cand.length ? cand[0].name : null;
+      L.areaFieldUnit = L.areaField && /HECTARE/i.test(L.areaField) ? "ha"
+                       : L.areaField && /ACRE/i.test(L.areaField) ? "ac" : "m2";
+    }
     L.geom = meta.geometryType || "";
     if(L.hi) L.hiField = L.fields.find(function(f){ return L.hi.test(f); }) || null;
     // Lines & points need a buffer to "intersect" a nearby location.
@@ -354,7 +377,22 @@ function fetchParcelGeom(x, y){
         if(a != null && a > 0 && a < bestA){ bestA = a; best = f; }
       });
       if(!best) best = feats[0];
-      return { geometry: best.geometry, attrs: best.attributes||{}, areaM2: ringAreaM2(best.geometry, y) };
+      var attrs = best.attributes||{};
+      var pub = null, pubUnit = P.areaFieldUnit || "m2";
+      if(P.areaField && attrs[P.areaField] != null && attrs[P.areaField] !== ""){
+        var raw = Number(attrs[P.areaField]);
+        if(!isNaN(raw) && raw > 0){
+          pub = pubUnit==="ha" ? raw*10000 : pubUnit==="ac" ? raw*4046.8564224 : raw;
+        }
+      }
+      // HRM-published area only. No geometry computation \u2014 the computed
+      // estimate was unreliable, so a blank is preferred over a wrong number.
+      return {
+        geometry: best.geometry,
+        attrs: attrs,
+        areaM2: pub,                       // null if HRM doesn't publish it
+        areaSource: pub != null ? ("field:"+P.areaField) : "unpublished"
+      };
     }).catch(function(){ return null; });
 }
 
@@ -553,7 +591,7 @@ function finish(pt){
     return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y)])
       .then(function(extra){
         renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
-                       parcelArea:parcel?parcel.areaM2:null, apps:extra[1] });
+                       parcelArea:parcel?parcel.areaM2:null, areaSource:parcel?parcel.areaSource:null, apps:extra[1] });
       });
   });
 }
@@ -740,9 +778,12 @@ var abut = R.abut || {abutters:[], acrossRoad:[], method:"none"};
     + '<div class="section"><h3>Abutting zones</h3>'+abutHtml+'</div>'
     + '<div class="section"><h3>Nearby planning applications</h3>'+appsHtml+'</div>'
     + (parcelHit ? '<div class="section"><h3>Parcel</h3>'
-        + (R.parcelArea ? '<div class="hit"><div class="hit-label">Lot area (computed, approx.)</div><div class="hit-val">'
-            + Math.round(R.parcelArea).toLocaleString() + ' m\u00b2</div>'
-            + '<div class="hit-note">Derived from parcel geometry \u2014 confirm by survey. Not the raw Shape__Area field.</div></div>' : "")
+        + (R.parcelArea != null
+            ? '<div class="hit"><div class="hit-label">Lot area (HRM)</div>'
+              + '<div class="hit-val">' + Math.round(R.parcelArea).toLocaleString() + ' m\u00b2</div>'
+              + '<div class="hit-note">As published by HRM' + (R.areaSource && R.areaSource.indexOf("field:")===0 ? ' (' + escH(R.areaSource.replace("field:","")) + ')' : '') + '. Confirm by survey for design.</div></div>'
+            : '<div class="hit"><div class="hit-label">Lot area (HRM)</div>'
+              + '<div class="hit-note">Not published by HRM for this parcel \u2014 confirm by survey / Property Online.</div></div>')
         + attrTable(parcelHit.attrs)+'</div>' : "")
     + (R.pt.attrs && Object.keys(R.pt.attrs).length ? '<div class="section"><h3>Civic record</h3>'+attrTable(R.pt.attrs)+'</div>' : "")
     + '</div>';
@@ -759,14 +800,16 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v19)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v21)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
   t += "Civic address: " + (R.pt.label||"\u2014") + "\n";
   t += "PID: " + (pid||"\u2014 (confirm)") + "\n";
   t += "Coordinates: " + R.ll.lat.toFixed(6) + ", " + R.ll.lon.toFixed(6) + "\n";
-  t += "Lot area (computed, approx.): " + (R.parcelArea ? Math.round(R.parcelArea).toLocaleString() + " m\u00b2 \u2014 confirm by survey" : "\u2014 (parcel geometry unavailable)") + "\n";
+  t += "Lot area (HRM): " + (R.parcelArea != null
+        ? Math.round(R.parcelArea).toLocaleString() + " m\u00b2 \u2014 as published by HRM; confirm by survey"
+        : "not published by HRM \u2014 confirm by survey / Property Online") + "\n";
   t += "Zone: " + (zoneVal||"\u2014 NOT READ \u2014 screenshot required") + (zoneHit&&zoneHit.buffered?"  [nearest-match \u2014 VERIFY at parcel scale]":"") + "\n\n";
 
   t += "MAPPED SCHEDULE VALUES (GIS-read \u2014 acceptable per rev-4 unless flagged)\n";
@@ -858,6 +901,8 @@ function renderAdv(){
   lines.push("civic: " + (c.url ? "ok  PID:"+(c.pidField||"?")+"  addr:"+((c.addrFields||[]).join(",")||"?") : (c.error||"?")));
   lines.push("geocoder: " + (state.geoOK===null?"probing":state.geoOK?"reachable":"blocked (civic fallback)"));
   lines.push("streets layer: " + (STREETS_SVC||"NOT RESOLVED \u2014 across-road classification off"));
+  var pL = CATALOG.find(function(L){ return L.key==="parcel"; });
+  lines.push("parcel area field: " + (pL && pL.areaField ? pL.areaField + " ("+(pL.areaFieldUnit||"m2")+")" : "none found \u2014 using computed geometry"));
   $("adv").textContent = lines.join("\n");
 }
 
