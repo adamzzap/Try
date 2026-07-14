@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v15 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v16 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -379,9 +379,13 @@ function abuttingZones(parcelGeom, ownZone){
     return Promise.resolve({abutters:[], acrossRoad:[], method:"noparcel"});
   }
 
+  // 9 m intersect-buffer around the parcel: reliably catches true side/rear
+  // neighbours across small GIS edge-gaps without reaching a second lot deep
+  // (lots are rarely narrower than ~9 m). Road classification below then
+  // separates real abutters from parcels across a street.
   var body = "geometry=" + encodeURIComponent(JSON.stringify(parcelGeom))
     + "&geometryType=esriGeometryPolygon&inSR=102100"
-    + "&spatialRel=esriSpatialRelTouches"
+    + "&spatialRel=esriSpatialRelIntersects&distance=9&units=esriSRUnit_Meter"
     + "&outFields=" + zf + "&returnGeometry=true&outSR=102100&f=json";
 
   return j(Z.url + "/query?" + body).then(function(d){
@@ -418,7 +422,7 @@ function fetchStreetsNear(parcelGeom){
 // True if any street centreline passes between the parcel and the zone polygon:
 // i.e. a street vertex lies close to BOTH the parcel edge and the zone edge.
 function streetBetween(parcelGeom, zoneGeom, streets){
-  var NEAR = 6; // metres: a centreline within ~6 m of both boundaries sits in the road between them
+  var NEAR = 8; // metres: a centreline within ~6 m of both boundaries sits in the road between them
   var near2 = NEAR*NEAR;
   for(var s=0;s<streets.length;s++){
     var paths = streets[s].paths || [];
@@ -748,7 +752,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v15)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v16)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
