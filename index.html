@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v24 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v25 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -419,44 +419,71 @@ function parseAreaUnits(str){
 }
 
 function fetchParcelGeom(x, y){
-  // Get the subject parcel polygon at the point (full geometry, for adjacency),
-  // and ask the server for the TRUE area in square metres (geodesic), which the
-  // raw Shape__Area field does not reliably give.
+  // Get the subject parcel polygon at the point (full geometry, for adjacency)
+  // and its published AREAUNITS. Two-stage like the other layers: exact point
+  // first; if that only turns up a sliver/placeholder record (or nothing),
+  // retry with a small buffer \u2014 the real parcel's boundary can sit a few
+  // feet from a geocoded street-address point on an irregular lot.
   var P = CATALOG.find(function(L){ return L.key==="parcel" && L.ok; });
   if(!P) return Promise.resolve(null);
-  var geom = JSON.stringify({x:x,y:y,spatialReference:{wkid:102100}});
-  var base = P.url + "/query?geometry=" + encodeURIComponent(geom)
-    + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects";
-  // Return ALL intersecting parcels so we can pick the single smallest one.
-  // HRM stacks overlapping polygons (condo / ROW / assessment); taking the
-  // smallest avoids merging them into one oversized shape.
-  return j(base + "&outFields=*&returnGeometry=true&outSR=102100&f=json")
-    .then(function(d){
-      var feats = (d.features||[]).filter(function(f){ return f.geometry && f.geometry.rings; });
-      if(!feats.length) return null;
-      // Parse each stacked parcel's published area from its AREAUNITS string
-      // ("345 Square Metres", "1 Square Feet", ...). Sliver/placeholder records
-      // (parsed area < 5 m2, like the literal 1-sq-ft parcels) are ignored when
-      // choosing the subject parcel \u2014 they were hijacking the selection.
-      feats.forEach(function(f){
-        f._pubM2 = parseAreaUnits(f.attributes && f.attributes.AREAUNITS);
+
+  function pick(feats){
+    feats = (feats||[]).filter(function(f){ return f.geometry && f.geometry.rings; });
+    if(!feats.length) return null;
+    feats.forEach(function(f){
+      f._pubM2 = parseAreaUnits(f.attributes && f.attributes.AREAUNITS);
+    });
+    var real = feats.filter(function(f){ return f._pubM2 != null && f._pubM2 >= 5; });
+    if(!real.length) return null;  // only slivers/unpublished \u2014 caller may retry wider
+    // Prefer the real-area candidate whose geometry is nearest the point.
+    var best = null, bestD = Infinity;
+    real.forEach(function(f){
+      var d = nearestRingDist(f.geometry, x, y);
+      if(d < bestD){ bestD = d; best = f; }
+    });
+    if(!best) best = real[0];
+    return {
+      geometry: best.geometry,
+      attrs: best.attributes||{},
+      areaM2: best._pubM2,
+      areaSource: "AREAUNITS"
+    };
+  }
+
+  function query(bufferM){
+    var geom = JSON.stringify({x:x,y:y,spatialReference:{wkid:102100}});
+    var u = P.url + "/query?geometry=" + encodeURIComponent(geom)
+      + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects"
+      + "&outFields=*&returnGeometry=true&outSR=102100&f=json";
+    if(bufferM) u += "&distance=" + bufferM + "&units=esriSRUnit_Meter";
+    return j(u).then(function(d){ return d.features||[]; }).catch(function(){ return []; });
+  }
+
+  return query(null).then(function(exact){
+    var got = pick(exact);
+    if(got) return got;
+    // Exact point found nothing usable (empty, or sliver-only) \u2014 widen.
+    return query(5).then(function(near){
+      var got5 = pick(near);
+      if(got5) return got5;
+      return query(20).then(function(wide){
+        var got20 = pick(wide);
+        if(got20) return got20;
+        // Nothing with real area anywhere nearby: fall back to whatever exact
+        // point returned (even a sliver) so geometry/abutment still work,
+        // but leave area explicitly unpublished rather than reporting 1 sq ft.
+        var feats = exact.filter(function(f){ return f.geometry && f.geometry.rings; });
+        if(!feats.length) return null;
+        var best = null, bestA = Infinity;
+        feats.forEach(function(f){
+          var a = ringAreaM2(f.geometry, y);
+          if(a != null && a > 0 && a < bestA){ bestA = a; best = f; }
+        });
+        if(!best) best = feats[0];
+        return { geometry: best.geometry, attrs: best.attributes||{}, areaM2: null, areaSource: "unpublished" };
       });
-      var real = feats.filter(function(f){ return f._pubM2 != null && f._pubM2 >= 5; });
-      var pool = real.length ? real : feats;
-      // Among plausible parcels, keep the smallest-geometry rule (anti-merge).
-      var best = null, bestA = Infinity;
-      pool.forEach(function(f){
-        var a = ringAreaM2(f.geometry, y);
-        if(a != null && a > 0 && a < bestA){ bestA = a; best = f; }
-      });
-      if(!best) best = pool[0];
-      return {
-        geometry: best.geometry,
-        attrs: best.attributes||{},
-        areaM2: best._pubM2 != null && best._pubM2 >= 5 ? best._pubM2 : null,
-        areaSource: best._pubM2 != null ? "AREAUNITS" : "unpublished"
-      };
-    }).catch(function(){ return null; });
+    });
+  });
 }
 
 // Shoelace area on a Web Mercator ring, corrected for Mercator distortion at
@@ -907,7 +934,7 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v24)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v25)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
