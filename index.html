@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v21 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v22 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -166,6 +166,7 @@ var CATALOG = [
 ];
 var APPS_SVC = ORG + "/PPLC_Planning_Applications_Geolocated/FeatureServer/0";
 var STREETS_SVC = null;  // resolved at boot by scanning the org directory for a street/centreline layer
+var AREA_LAYER = null;   // {url, field, unit} resolved at boot: the layer that publishes lot area
 
 // Built-form values that are text-only (no GIS layer) — verified entries join by zone.
 var REGS = {
@@ -213,7 +214,8 @@ function boot(){
       }) || (dir.services||[]).find(function(x){ return /street|road/i.test(x.name) && /Feature/i.test(x.type); });
       if(svc) STREETS_SVC = ORG + "/" + svc.name + "/" + svc.type + "/0";
     }catch(e){}
-    return Promise.all(CATALOG.map(prepLayer)).then(function(){
+    var areaScan = discoverAreaLayer(dir);
+    return Promise.all([areaScan, Promise.all(CATALOG.map(prepLayer))]).then(function(){
       var ok = CATALOG.filter(function(L){ return L.ok; });
       state.layers = ok;
       setDot("d-layers", ok.length ? "live" : "down");
@@ -233,6 +235,51 @@ function boot(){
       "Deploy this file (Vercel / GitHub Pages) or open it in a regular browser tab.";
     renderAdv();
   });
+}
+
+function discoverAreaLayer(dir){
+  // Find the layer ExploreHRM uses for its property popup: a parcel/property
+  // layer whose fields include a published lot-area size (field name or alias
+  // like "Area (lot) Size", AREASZ, LOT_SIZE, AREA_SQM, etc.).
+  var svcs = (dir.services||[]).filter(function(x){
+    return /parcel|propert|assess|account|pvsc|boundary/i.test(x.name) && /Feature|Map/i.test(x.type);
+  }).slice(0, 8);
+  var areaRe = /AREA.?LOT|LOT.?AREA|AREA.?SIZE|AREASZ|AREA_?SQM|LOT.?SIZE|LAND.?SIZE|LND.?AREA|PARCEL.?AREA|GIS.?AREA|SIZE.?SQM|^AREA$|AREA_M/i;
+  var aliasRe = /area\s*\(?lot\)?\s*size|lot\s*size|area\s*size|parcel\s*area|lot\s*area/i;
+  var chain = Promise.resolve();
+  svcs.forEach(function(x){
+    chain = chain.then(function(){
+      if(AREA_LAYER) return;                 // already found
+      var base = ORG + "/" + x.name + "/" + x.type;
+      return j(base + "?f=json").then(function(meta){
+        var layers = (meta.layers && meta.layers.length) ? meta.layers : [{id:0}];
+        var sub = Promise.resolve();
+        layers.slice(0,4).forEach(function(ly){
+          sub = sub.then(function(){
+            if(AREA_LAYER) return;
+            var lurl = base + "/" + ly.id;
+            return j(lurl + "?f=json").then(function(lm){
+              var fields = lm.fields||[];
+              var hit = fields.find(function(f){
+                return (areaRe.test(f.name||"") || aliasRe.test(f.alias||""))
+                  && /Double|Integer|Single|Small|String/i.test(f.type)
+                  && !/SHAPE__|ST_?AREA/i.test(f.name||"");
+              });
+              // require a PID or AAN key so we can match the subject parcel
+              var key = fields.find(function(f){ return /^PID$|PID_|^AAN$|ACCOUNT|ASSESS.?ACC/i.test(f.name||""); });
+              if(hit){
+                var unit = /HECTARE/i.test(hit.name)?"ha":/ACRE/i.test(hit.name)?"ac":"m2";
+                AREA_LAYER = { url:lurl, field:hit.name, alias:hit.alias||hit.name, unit:unit,
+                               keyField: key?key.name:null };
+              }
+            }).catch(function(){});
+          });
+        });
+        return sub;
+      }).catch(function(){});
+    });
+  });
+  return chain;
 }
 
 function prepLayer(L){
@@ -577,6 +624,23 @@ function pickLabel(attrs){
   return null;
 }
 
+function lookupPublishedArea(px, py){
+  if(!AREA_LAYER) return Promise.resolve(null);
+  var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
+  var u = AREA_LAYER.url + "/query?geometry=" + encodeURIComponent(geom)
+    + "&geometryType=esriGeometryPoint&inSR=102100&spatialRel=esriSpatialRelIntersects"
+    + "&outFields=" + encodeURIComponent(AREA_LAYER.field + (AREA_LAYER.keyField?","+AREA_LAYER.keyField:""))
+    + "&returnGeometry=false&f=json";
+  return j(u).then(function(d){
+    var f = d.features && d.features[0];
+    if(!f) return null;
+    var raw = Number(f.attributes[AREA_LAYER.field]);
+    if(isNaN(raw) || raw<=0) return null;
+    var m2 = AREA_LAYER.unit==="ha"?raw*10000:AREA_LAYER.unit==="ac"?raw*4046.8564224:raw;
+    return { m2:m2, field:AREA_LAYER.alias||AREA_LAYER.field };
+  }).catch(function(){ return null; });
+}
+
 function finish(pt){
   var ll = mercToLatLon(pt.x, pt.y);
   return Promise.all([
@@ -588,10 +652,13 @@ function finish(pt){
     var parcelGeom = parcel ? parcel.geometry : null;
     var zoneHit = hits.find(function(h){ return h.layer.key==="zoning"; });
     var ownZone = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
-    return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y)])
+    return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y), lookupPublishedArea(pt.x, pt.y)])
       .then(function(extra){
+        var pubArea = extra[2];
         renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
-                       parcelArea:parcel?parcel.areaM2:null, areaSource:parcel?parcel.areaSource:null, apps:extra[1] });
+                       parcelArea: pubArea ? pubArea.m2 : null,
+                       areaField: pubArea ? pubArea.field : null,
+                       apps:extra[1] });
       });
   });
 }
@@ -779,11 +846,11 @@ var abut = R.abut || {abutters:[], acrossRoad:[], method:"none"};
     + '<div class="section"><h3>Nearby planning applications</h3>'+appsHtml+'</div>'
     + (parcelHit ? '<div class="section"><h3>Parcel</h3>'
         + (R.parcelArea != null
-            ? '<div class="hit"><div class="hit-label">Lot area (HRM)</div>'
+            ? '<div class="hit"><div class="hit-label">Area (lot) size \u2014 HRM</div>'
               + '<div class="hit-val">' + Math.round(R.parcelArea).toLocaleString() + ' m\u00b2</div>'
-              + '<div class="hit-note">As published by HRM' + (R.areaSource && R.areaSource.indexOf("field:")===0 ? ' (' + escH(R.areaSource.replace("field:","")) + ')' : '') + '. Confirm by survey for design.</div></div>'
-            : '<div class="hit"><div class="hit-label">Lot area (HRM)</div>'
-              + '<div class="hit-note">Not published by HRM for this parcel \u2014 confirm by survey / Property Online.</div></div>')
+              + '<div class="hit-note">As published by HRM (Province of NS / PVSC). Confirm by survey for design.</div></div>'
+            : '<div class="hit"><div class="hit-label">Area (lot) size \u2014 HRM</div>'
+              + '<div class="hit-note">Not returned from HRM\u2019s area layer at this point \u2014 confirm on ExploreHRM / Property Online.</div></div>')
         + attrTable(parcelHit.attrs)+'</div>' : "")
     + (R.pt.attrs && Object.keys(R.pt.attrs).length ? '<div class="section"><h3>Civic record</h3>'+attrTable(R.pt.attrs)+'</div>' : "")
     + '</div>';
@@ -800,16 +867,16 @@ function copyCutSheet(){
   var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v21)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v22)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
   t += "Civic address: " + (R.pt.label||"\u2014") + "\n";
   t += "PID: " + (pid||"\u2014 (confirm)") + "\n";
   t += "Coordinates: " + R.ll.lat.toFixed(6) + ", " + R.ll.lon.toFixed(6) + "\n";
-  t += "Lot area (HRM): " + (R.parcelArea != null
-        ? Math.round(R.parcelArea).toLocaleString() + " m\u00b2 \u2014 as published by HRM; confirm by survey"
-        : "not published by HRM \u2014 confirm by survey / Property Online") + "\n";
+  t += "Area (lot) size (HRM): " + (R.parcelArea != null
+        ? Math.round(R.parcelArea).toLocaleString() + " m\u00b2 \u2014 as published by HRM (Prov NS/PVSC); confirm by survey"
+        : "not returned from HRM area layer \u2014 confirm on ExploreHRM / Property Online") + "\n";
   t += "Zone: " + (zoneVal||"\u2014 NOT READ \u2014 screenshot required") + (zoneHit&&zoneHit.buffered?"  [nearest-match \u2014 VERIFY at parcel scale]":"") + "\n\n";
 
   t += "MAPPED SCHEDULE VALUES (GIS-read \u2014 acceptable per rev-4 unless flagged)\n";
@@ -902,7 +969,7 @@ function renderAdv(){
   lines.push("geocoder: " + (state.geoOK===null?"probing":state.geoOK?"reachable":"blocked (civic fallback)"));
   lines.push("streets layer: " + (STREETS_SVC||"NOT RESOLVED \u2014 across-road classification off"));
   var pL = CATALOG.find(function(L){ return L.key==="parcel"; });
-  lines.push("parcel area field: " + (pL && pL.areaField ? pL.areaField + " ("+(pL.areaFieldUnit||"m2")+")" : "none found \u2014 using computed geometry"));
+  lines.push("area layer: " + (AREA_LAYER ? AREA_LAYER.url + "  field:" + AREA_LAYER.field + " ("+AREA_LAYER.unit+")" : "NOT RESOLVED \u2014 no published area found"));
   $("adv").textContent = lines.join("\n");
 }
 
