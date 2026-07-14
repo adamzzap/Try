@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v6 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v7 &middot; 2026-07-13</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -130,17 +130,17 @@ var APPS_BUFFER_M = 150;  // nearby planning applications radius
 // group: zone | builtform | overlay | context | parcel
 // hi: regex for the headline field to feature; status "draft" gets flagged.
 var CATALOG = [
-  { key:"zoning",    svc:"ZoningBoundaries",                     group:"zone",      label:"Zoning (adopted LUB)", hi:/^ZONE$/i },
+  { key:"zoning",    svc:"ZoningBoundaries",                     group:"zone",      label:"Zone (adopted LUB)", hi:/^ZONE$/i },
 
-  { key:"maxhgt",    svc:"Maximum_Building_Heights",             group:"builtform", label:"Max building height", hi:/HGT|HEIGHT/i },
-  { key:"prebonus",  svc:"Pre_Bonus_Building_Height",            group:"builtform", label:"Pre-bonus height", hi:/HGT|HEIGHT/i },
-  { key:"postbonus", svc:"Post_Bonus_Building_Height",           group:"builtform", label:"Post-bonus height", hi:/HGT|HEIGHT/i },
-  { key:"far",       svc:"RC_Maximum_Floor_Area_Ratio",          group:"builtform", label:"Max floor area ratio (RC)", hi:/FAR|RATIO/i },
-  { key:"minyard",   svc:"RC_Minimum_Front_and_Flanking_Yards",  group:"builtform", label:"Min front/flanking yard (RC)", hi:/YARD|MIN|SETBACK/i },
-  { key:"maxyard",   svc:"RC_Maximum_Front_and_Flanking_Yards",  group:"builtform", label:"Max front/flanking yard (RC)", hi:/YARD|MAX|SETBACK/i },
-  { key:"minyard2",  svc:"Minimum_Front_and_Flanking_Yards",     group:"builtform", label:"Min front/flanking yard", hi:/YARD|MIN|SETBACK/i },
+  { key:"maxhgt",    svc:"Maximum_Building_Heights",             group:"builtform", label:"Sched 15 \u2014 Max building height (m)", hi:/HGT|HEIGHT/i },
+  { key:"prebonus",  svc:"Pre_Bonus_Building_Height",            group:"builtform", label:"Pre-bonus height (downtown)", hi:/HGT|HEIGHT/i },
+  { key:"postbonus", svc:"Post_Bonus_Building_Height",           group:"builtform", label:"Post-bonus height (downtown)", hi:/HGT|HEIGHT/i },
+  { key:"far",       svc:"RC_Maximum_Floor_Area_Ratio",          group:"builtform", label:"Sched 17 \u2014 Max floor area ratio", hi:/FAR|RATIO/i },
+  { key:"minyard",   svc:"RC_Minimum_Front_and_Flanking_Yards",  group:"builtform", label:"Sched 18 \u2014 Min front/flanking setback (streetlines only)", hi:/YARD|MIN|SETBACK/i },
+  { key:"maxyard",   svc:"RC_Maximum_Front_and_Flanking_Yards",  group:"builtform", label:"Sched 19 \u2014 Max front/flanking setback (streetlines only)", hi:/YARD|MAX|SETBACK/i },
+  { key:"minyard2",  svc:"Minimum_Front_and_Flanking_Yards",     group:"builtform", label:"Min front/flanking setback (non-RC schedule)", hi:/YARD|MIN|SETBACK/i },
   { key:"stwall",    svc:"RC_Maximum_Streetwall_Heights",        group:"builtform", label:"Max streetwall height (RC)", hi:/HGT|HEIGHT|WALL/i },
-  { key:"hgtprec",   svc:"Height_Precincts",                     group:"builtform", label:"Height precinct", hi:/HGT|HEIGHT|PRECINCT/i },
+  { key:"hgtprec",   svc:"Height_Precincts",                     group:"builtform", label:"Height precinct (downtown)", hi:/HGT|HEIGHT|PRECINCT/i },
 
   { key:"spa",       svc:"Special_Planning_Areas",               group:"overlay",   label:"Special Planning Area" },
   { key:"rcspecial", svc:"RC_Special_Area_Boundary",             group:"overlay",   label:"RC Special Area" },
@@ -149,10 +149,10 @@ var CATALOG = [
   { key:"landmark",  svc:"RC_Landmark_Building_Sites",           group:"overlay",   label:"Landmark building site (RC)" },
   { key:"noparking", svc:"RC_Accessory_Parking_Prohibited_Areas",group:"overlay",   label:"Accessory parking prohibited (RC)" },
   { key:"shadow",    svc:"RC_Shadow_Impact_Assessment_Areas",    group:"overlay",   label:"Shadow impact assessment area (RC)" },
-  { key:"flood",     svc:"Floodplain_Overlay_Zones_and_Modified_Floodproofing", group:"overlay", label:"Floodplain overlay" },
-  { key:"hcd",       svc:"Active_and_Proposed_Heritage_Conservation_Districts", group:"overlay", label:"Heritage Conservation District" },
+  { key:"flood",     svc:"Floodplain_Overlay_Zones_and_Modified_Floodproofing", group:"overlay", label:"Sched 14 \u2014 Floodplain overlay" },
+  { key:"hcd",       svc:"Active_and_Proposed_Heritage_Conservation_Districts", group:"overlay", label:"Sched 22 \u2014 Heritage Conservation District" },
   { key:"heritage",  svc:"Heritage_Properties",                  group:"overlay",   label:"Heritage property", buffer:LINE_BUFFER_M },
-  { key:"pocs",      svc:"RC_Pedestrian_Oriented_Commercial_Streets", group:"overlay", label:"Pedestrian-oriented commercial street (RC)", buffer:LINE_BUFFER_M },
+  { key:"pocs",      svc:"RC_Pedestrian_Oriented_Commercial_Streets", group:"overlay", label:"Sched 7 \u2014 Pedestrian-oriented commercial street", buffer:LINE_BUFFER_M },
   { key:"trans",     svc:"RC_Transition_Lines",                  group:"overlay",   label:"Transition line (RC)", buffer:LINE_BUFFER_M },
   { key:"viewpl",    svc:"View_Planes",                          group:"overlay",   label:"View plane" },
   { key:"viewcor",   svc:"RC_LUB_View_Corridors",                group:"overlay",   label:"View corridor (RC LUB)" },
@@ -503,7 +503,7 @@ function renderResult(R){
     + '<div class="res-head"><div>'
     +   '<div class="res-title">'+escH(R.pt.label||"Location")+'</div>'
     +   (R.pt.score!=null?'<div class="res-sub">match score '+Math.round(R.pt.score)+'</div>':"")
-    + '</div><button class="copy" id="copy">Copy for cut sheet</button></div>'
+    + '</div><button class="copy" id="copy">Copy intake</button></div>'
     + '<div class="coords">'
     +   '<span class="k">lat</span><span class="k">lon</span>'
     +   '<span>'+R.ll.lat.toFixed(6)+'</span><span>'+R.ll.lon.toFixed(6)+'</span>'
@@ -523,31 +523,76 @@ function renderResult(R){
 function copyCutSheet(){
   if(!LAST) return;
   var R = LAST;
-  var t = (R.pt.label||"Location") + "\n";
-  t += "Coordinates: " + R.ll.lat.toFixed(6) + ", " + R.ll.lon.toFixed(6) + "\n\n";
-  var groups = [["zone","ZONE"],["builtform","MAPPED BUILT-FORM SCHEDULES"],["overlay","OVERLAYS & SPECIAL AREAS"],["context","PLAN CONTEXT"],["parcel","PARCEL"]];
-  groups.forEach(function(g){
-    var hs = R.hits.filter(function(h){ return h.layer.group===g[0]; });
-    if(!hs.length) return;
-    t += g[1] + "\n";
-    hs.forEach(function(h){
-      var head = h.layer.hiField && h.attrs[h.layer.hiField] != null ? ": " + h.attrs[h.layer.hiField] : "";
-      t += "- " + h.layer.label + head + (h.buffered ? " (nearest)" : "") + "\n";
-      cleanAttrs(h.attrs).forEach(function(kv){
-        if(kv[0] !== h.layer.hiField) t += "    " + kv[0] + ": " + kv[1] + "\n";
-      });
+  var hitsBy = function(g){ return R.hits.filter(function(h){ return h.layer.group===g; }); };
+  var zoneHit = hitsBy("zone")[0];
+  var zoneVal = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
+  var pid = state.civic && state.civic.pidField && R.pt.attrs ? R.pt.attrs[state.civic.pidField] : null;
+  var boundary = R.adj && R.adj.length;
+  var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
+
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v7)\n";
+  t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
+
+  t += "SITE\n";
+  t += "Civic address: " + (R.pt.label||"\u2014") + "\n";
+  t += "PID: " + (pid||"\u2014 (confirm)") + "\n";
+  t += "Coordinates: " + R.ll.lat.toFixed(6) + ", " + R.ll.lon.toFixed(6) + "\n";
+  t += "Zone: " + (zoneVal||"\u2014 NOT READ \u2014 screenshot required") + (zoneHit&&zoneHit.buffered?"  [nearest-match \u2014 VERIFY at parcel scale]":"") + "\n\n";
+
+  t += "MAPPED SCHEDULE VALUES (GIS-read \u2014 acceptable per rev-4 unless flagged)\n";
+  var bf = hitsBy("builtform");
+  if(bf.length){
+    bf.forEach(function(h){
+      var v = h.layer.hiField && h.attrs[h.layer.hiField]!=null ? h.attrs[h.layer.hiField] : "(see attributes)";
+      t += "- " + h.layer.label + ": " + v + (h.buffered?"  [within "+(h.layer.buffer||BUFFER_M)+" m of point \u2014 corner lots may carry two frontage values; VERIFY]":"") + "\n";
     });
-    t += "\n";
-  });
-  if(R.adj && R.adj.length) t += "ADJACENT ZONES (within "+ADJ_BUFFER_M+" m): " + R.adj.join(", ") + "\n\n";
-  if(R.apps && R.apps.length){
-    t += "NEARBY PLANNING APPLICATIONS (within "+APPS_BUFFER_M+" m):\n";
-    R.apps.forEach(function(a){
-      t += "- " + cleanAttrs(a).slice(0,4).map(function(kv){ return kv[0]+": "+kv[1]; }).join(" | ") + "\n";
-    });
+  } else {
+    t += "- No mapped built-form schedules intersect this point.\n";
   }
+  t += "\n";
+
+  t += "OVERLAYS \u2014 explicit status\n";
+  var ovAll = state.layers.filter(function(L){ return L.group==="overlay"; });
+  ovAll.forEach(function(L){
+    var h = R.hits.find(function(x){ return x.layer===L; });
+    if(h){
+      var v = h.layer.hiField && h.attrs[h.layer.hiField]!=null ? ": "+h.attrs[h.layer.hiField] : "";
+      t += "- APPLIES \u2014 " + L.label + v + "\n";
+    } else {
+      t += "- Not applicable \u2014 " + L.label + "\n";
+    }
+  });
+  t += "\n";
+
+  t += "PLAN CONTEXT\n";
+  hitsBy("context").forEach(function(h){
+    var v = h.layer.hiField && h.attrs[h.layer.hiField]!=null ? ": "+h.attrs[h.layer.hiField] : "";
+    var name = "";
+    cleanAttrs(h.attrs).slice(0,1).forEach(function(kv){ if(!v) name = ": "+kv[1]; });
+    t += "- " + h.layer.label + (v||name) + "\n";
+  });
+  t += "\n";
+
+  t += "ADJACENT ZONES (within " + ADJ_BUFFER_M + " m): " + (boundary ? R.adj.join(", ") : "none differing") + "\n";
+  if(R.apps && R.apps.length){
+    t += "NEARBY APPLICATIONS (" + APPS_BUFFER_M + " m): " + R.apps.length + " \u2014 see tool output\n";
+  }
+  t += "\n";
+
+  t += "NOT READ BY THIS TOOL \u2014 LUB TEXT / SCREENSHOT ITEMS\n";
+  t += "- Side setback: LUB text (s. 229 ER / s. 113 corridor, chapter-specific) + Schedule 3C modifications\n";
+  t += "- Rear setback: LUB text (s. 230 or chapter equivalent)\n";
+  t += "- Min lot area / frontage / lot coverage: LUB Tables (2/3/6/10)\n";
+  t += "- Schedule 3C special-area status: NOT confirmed by tool \u2014 parcel-scale screenshot required for ER sites\n";
+  t += "- Abutter zones per side: tool reports zones within " + ADJ_BUFFER_M + " m, not per-lot-line \u2014 confirm from zoning screenshot\n\n";
+
+  t += "VERIFICATION FLAGS\n";
+  if(boundary) t += "- BOUNDARY PROXIMITY: differing zones within " + ADJ_BUFFER_M + " m \u2014 parcel-scale screenshot required for zone + schedule reads\n";
+  if(anyBuffered) t += "- BUFFERED READ: one or more schedule values matched by proximity, not exact point \u2014 verify at parcel scale\n";
+  if(!boundary && !anyBuffered) t += "- None \u2014 clean point reads; screenshots optional per rev-4\n";
+
   navigator.clipboard && navigator.clipboard.writeText(t);
-  var b = $("copy"); b.textContent = "Copied"; setTimeout(function(){ b.textContent = "Copy for cut sheet"; },1400);
+  var b = $("copy"); b.textContent = "Copied"; setTimeout(function(){ b.textContent = "Copy intake"; },1400);
 }
 
 function renderAdv(){
@@ -583,3 +628,4 @@ boot();
 </script>
 </body>
 </html>
+
