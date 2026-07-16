@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v33 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v35 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -125,6 +125,9 @@ var BUFFER_M = 20;        // polygon fallback buffer (address pin on street)
 var LINE_BUFFER_M = 30;   // for line/point overlay layers (POCS, transition lines...)
 var ADJ_BUFFER_M = 60;    // adjacent-zone scan radius
 var APPS_BUFFER_M = 150;  // nearby planning applications radius
+// Paste your cut-sheet Claude Project URL here (open the project in claude.ai
+// and copy the address bar, e.g. "https://claude.ai/project/xxxxxxxx").
+var CUTSHEET_PROJECT_URL = "https://claude.ai/projects";
 
 // The layer catalog — everything useful found in HRM's services directory.
 // group: zone | builtform | overlay | context | parcel
@@ -697,6 +700,40 @@ function lookupPublishedArea(px, py, parcelAttrs){
   }).catch(function(){ return null; });
 }
 
+function polygonCentroid(geom){
+  // Area-weighted centroid of a polygon's outer ring (guaranteed inside for
+  // convex-ish parcels; adequate for zoning point-in-polygon). Falls back to
+  // vertex average if the signed area is degenerate.
+  if(!geom || !geom.rings || !geom.rings[0]) return null;
+  var ring = geom.rings[0], n = ring.length, A=0, cx=0, cy=0;
+  for(var i=0;i<n-1;i++){
+    var x0=ring[i][0], y0=ring[i][1], x1=ring[i+1][0], y1=ring[i+1][1];
+    var cross = x0*y1 - x1*y0;
+    A += cross; cx += (x0+x1)*cross; cy += (y0+y1)*cross;
+  }
+  if(Math.abs(A) < 1e-6){
+    var sx=0, sy=0, m=0;
+    ring.forEach(function(p){ sx+=p[0]; sy+=p[1]; m++; });
+    return m ? {x:sx/m, y:sy/m} : null;
+  }
+  A*=0.5;
+  return { x: cx/(6*A), y: cy/(6*A) };
+}
+
+function zoneAtParcel(parcelGeom){
+  // Zoning has NO PID field \u2014 it can only be matched spatially. Query at the
+  // parcel CENTROID (inside the true lot) rather than the geocoded address point,
+  // which can drift onto a neighbouring zone on irregular / waterfront lots.
+  var Z = CATALOG.find(function(L){ return L.key==="zoning" && L.ok; });
+  var c = polygonCentroid(parcelGeom);
+  if(!Z || !c) return Promise.resolve(null);
+  var zf = Z.hiField || "ZONE";
+  return j(pointQueryUrl(Z.url, c.x, c.y)).then(function(d){
+    var f = d.features && d.features[0];
+    return f ? { attrs:f.attributes, zf:zf, centroid:c } : null;
+  }).catch(function(){ return null; });
+}
+
 function finish(pt){
   var ll = mercToLatLon(pt.x, pt.y);
   return resolveCivicPID(pt.label).then(function(civicPID){
@@ -718,17 +755,43 @@ function finish(pt){
       if(pIdx>=0) hits[pIdx] = newHit; else hits.push(newHit);
     }
     var zoneHit = hits.find(function(h){ return h.layer.key==="zoning"; });
+    // Prefer the centroid-based zone read when we have the parcel polygon \u2014
+    // deterministic to the resolved parcel, immune to address-point drift.
+    var zonePromise = parcelGeom ? zoneAtParcel(parcelGeom) : Promise.resolve(null);
+    return zonePromise.then(function(zc){
+    if(zc && zoneHit){ zoneHit.attrs = zc.attrs; zoneHit.buffered = false; zoneHit._centroid = true; }
+    else if(zc && !zoneHit){
+      var ZL = CATALOG.find(function(L){ return L.key==="zoning"; });
+      zoneHit = { layer:ZL, attrs:zc.attrs, buffered:false, _centroid:true };
+      hits.unshift(zoneHit);
+    }
     var ownZone = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
     return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y), lookupPublishedArea(pt.x, pt.y, parcel ? parcel.attrs : null)])
       .then(function(extra){
         var pubArea = extra[2];
         var areaM2 = (parcel && parcel.areaM2 != null) ? parcel.areaM2
                    : (pubArea ? pubArea.m2 : null);
+        // Jurisdiction: is this site in the HRM Regional Centre? The RC built-form
+        // schedules (Sched 15/17/18/19 etc.) only apply there. Detect via the
+        // community name and any plan-context hit mentioning "Regional Centre".
+        var communityName = "";
+        var lbl0 = String(pt.label||"").toUpperCase();
+        var ci0 = lbl0.indexOf(",");
+        if(ci0>=0) communityName = lbl0.slice(ci0+1).trim();
+        var ctxText = hits.filter(function(h){ return h.layer && h.layer.group==="context"; })
+          .map(function(h){ return JSON.stringify(h.attrs||{}).toUpperCase(); }).join(" ");
+        var inRegionalCentre = /REGIONAL CENTRE/.test(ctxText)
+          || /HALIFAX|DARTMOUTH/.test(communityName) && !/BEDFORD|SACKVILLE|HAMMONDS|COLE HARBOUR|WAVERLEY|FALL RIVER|TIMBERLEA|HUBBARDS|MUSQUODOBOIT|PORTERS|EASTERN PASSAGE|EAST PRESTON/.test(communityName);
+        // Any RC-mapped built-form schedule actually returning a value is strong
+        // evidence we're in-area; absence on all of them supports out-of-area.
+        var rcSchedHit = hits.some(function(h){ return h.layer && h.layer.group==="builtform" && (h.attrs||h.features); });
         renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
+                       inRC: inRegionalCentre, rcSchedHit: rcSchedHit, community: communityName,
                        parcelArea: areaM2,
                        areaField: (parcel && parcel.areaM2 != null) ? "AREAUNITS" : (pubArea ? pubArea.field : null),
                        apps:extra[1] });
       });
+    });
   });
   });
 }
@@ -905,8 +968,19 @@ var abut = R.abut || {diff:[], parks:[], method:"none"};
 
   var parcelHit = byGroup("parcel")[0];
 
+  var juris = R.inRC
+    ? ''
+    : '<div class="section" style="background:#FBF3E4;border-left:3px solid var(--wait)">'
+      + '<div class="hit-label" style="color:#8a6d1b">\u26a0 Outside HRM Regional Centre'
+      + (R.community ? ' \u2014 ' + escH(R.community) : '') + '</div>'
+      + '<div class="muted">This tool reads the <b>Regional Centre LUB</b> schedules (heights, yards, FAR, streetwall). '
+      + 'They do <b>not</b> apply here. Zone, overlays, parcel and plan-context below are still valid, but built-form '
+      + 'standards must come from the applicable LUB (e.g. Bedford, Sackville, Mainland, or a rural LUB). '
+      + '<b>Planner review required</b> \u2014 do not rely on any built-form schedule values for this site.</div></div>';
+
   $("out").innerHTML =
     '<div class="panel res">'
+    + juris
     + '<div class="res-head"><div>'
     +   '<div class="res-title">'+escH(R.pt.label||"Location")+'</div>'
     +   (R.pt.score!=null?'<div class="res-sub">match score '+Math.round(R.pt.score)+'</div>':"")
@@ -916,7 +990,7 @@ var abut = R.abut || {diff:[], parks:[], method:"none"};
     +   '<span>'+R.ll.lat.toFixed(6)+'</span><span>'+R.ll.lon.toFixed(6)+'</span>'
     + '</div>'
     + '<div class="section"><h3>Zone (LUB)</h3>'+zoneHtml+'</div>'
-    + '<div class="section"><h3>Mapped built-form schedules</h3>'+bfHtml+'</div>'
+    + '<div class="section"><h3>Mapped built-form schedules</h3>' + (R.inRC ? bfHtml : '<div class="muted" style="color:#8a6d1b">Suppressed \u2014 site is outside the Regional Centre, so these RC schedule layers do not govern. Consult the applicable LUB.</div>') + '</div>'
     + '<div class="section"><h3>Overlays &amp; special areas</h3>'+ovHtml+'</div>'
     + '<div class="section"><h3>Plan context</h3>'+cxHtml+'</div>'
     + '<div class="section"><h3>Abutting zones</h3>'+abutHtml+'</div>'
@@ -937,13 +1011,14 @@ var abut = R.abut || {diff:[], parks:[], method:"none"};
           })()
         + attrTable(parcelHit.attrs)+'</div>' : "")
     + (R.pt.attrs && Object.keys(R.pt.attrs).length ? '<div class="section"><h3>Civic record</h3>'+attrTable(R.pt.attrs)+'</div>' : "")
+    + '<div class="section"><button class="go" id="gencs" style="width:100%">Generate draft cut sheet \u2192</button>'
+    + '<div class="muted" style="margin-top:6px;text-align:center">Copies the full intake and opens the cut-sheet Claude Project \u2014 paste into a new project chat. Output is a DRAFT until a planner clears the flags.</div></div>'
     + '</div>';
   $("copy").onclick = copyCutSheet;
+  var g = $("gencs"); if(g) g.onclick = generateCutsheet;
 }
 
-function copyCutSheet(){
-  if(!LAST) return;
-  var R = LAST;
+function buildIntakeText(R){
   var hitsBy = function(g){ return R.hits.filter(function(h){ return h.layer.group===g; }); };
   var zoneHit = hitsBy("zone")[0];
   var zoneVal = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
@@ -951,7 +1026,7 @@ function copyCutSheet(){
   var boundary = (R.abut && ((R.abut.diff && R.abut.diff.length) || (R.abut.parks && R.abut.parks.length))) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v33)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v35)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
@@ -961,10 +1036,19 @@ function copyCutSheet(){
   t += "Area (lot) size (HRM): " + (R.parcelArea != null
         ? Math.round(R.parcelArea).toLocaleString() + " m\u00b2 \u2014 as published by HRM (Prov NS/PVSC); confirm by survey"
         : "not returned from HRM area layer \u2014 confirm on ExploreHRM / Property Online") + "\n";
-  t += "Zone: " + (zoneVal||"\u2014 NOT READ \u2014 screenshot required") + (zoneHit&&zoneHit.buffered?"  [nearest-match \u2014 VERIFY at parcel scale]":"") + "\n\n";
+  t += "Zone: " + (zoneVal||"\u2014 NOT READ \u2014 screenshot required") + (zoneHit&&zoneHit._centroid?"  [read at parcel centroid]":(zoneHit&&zoneHit.buffered?"  [nearest-match \u2014 VERIFY at parcel scale]":"")) + "\n";
+  if(R.inRC === false){
+    t += "JURISDICTION: OUTSIDE HRM REGIONAL CENTRE" + (R.community?" (" + R.community + ")":"") + "\n";
+    t += "  Regional Centre built-form schedules DO NOT APPLY. Zone/overlays valid; built-form must come from the applicable LUB (Bedford/Sackville/Mainland/rural). PLANNER REVIEW REQUIRED.\n";
+  }
+  t += "\n";
 
   t += "MAPPED SCHEDULE VALUES (GIS-read \u2014 acceptable per rev-4 unless flagged)\n";
   var bf = hitsBy("builtform");
+  if(R.inRC === false){
+    t += "- SUPPRESSED \u2014 site outside Regional Centre; RC schedules do not govern. Use applicable LUB.\n";
+    bf = [];
+  }
   if(bf.length){
     bf.forEach(function(h){
       if(h.features){
@@ -1039,6 +1123,7 @@ function copyCutSheet(){
   if(!boundary && !anyBuffered) t += "- None \u2014 clean point reads; screenshots optional per rev-4\n";
 
   t += "\nPLANNER REVIEW REQUIRED\n";
+  if(R.inRC === false) t += "- JURISDICTION: confirm applicable LUB for " + (R.community||"this community") + "; Regional Centre schedule values are not applicable here\n";
   var zoneStr = String(zoneVal||"").toUpperCase();
   if(/^ER/.test(zoneStr)){
     t += "- Schedule 3C special-area status (ER zone): parcel-scale screenshot required\n";
@@ -1061,8 +1146,25 @@ function copyCutSheet(){
   }
   t += "- Side/rear setbacks, lot coverage, min lot area/frontage: LUB text \u2014 planner to confirm (not GIS-mapped)\n";
 
-  navigator.clipboard && navigator.clipboard.writeText(t);
+  return t;
+}
+
+function copyCutSheet(){
+  if(!LAST) return;
+  navigator.clipboard && navigator.clipboard.writeText(buildIntakeText(LAST));
   var b = $("copy"); b.textContent = "Copied"; setTimeout(function(){ b.textContent = "Copy intake"; },1400);
+}
+
+function generateCutsheet(){
+  if(!LAST) return;
+  var t = "Generate a DRAFT planning cut sheet from this GIS pre-check intake, per the project instructions (rev-4). "
+        + "Treat any uncleared verification flags and PLANNER REVIEW items as DRAFT conditions.\n\n"
+        + buildIntakeText(LAST);
+  navigator.clipboard && navigator.clipboard.writeText(t);
+  var b = $("gencs");
+  if(b){ b.textContent = "Intake copied \u2014 paste into the project chat"; 
+         setTimeout(function(){ b.textContent = "Generate draft cut sheet \u2192"; }, 3000); }
+  window.open(CUTSHEET_PROJECT_URL, "_blank");
 }
 
 function renderAdv(){
