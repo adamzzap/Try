@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v35 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v37 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -424,33 +424,98 @@ function parseAreaUnits(str){
   return v; // metres
 }
 
-function resolveCivicPID(matchedLabel){
-  // Authoritative PID from HRM Civic Addresses. The address is stored SPLIT:
-  //   CIV_NUM (integer), STR_NAME (e.g. "PRINCE ALBERT"), STR_TYPE (e.g. "RD"),
-  //   GSA_NAME (community). FULL_CIVIC holds only the number ("89"), so we must
-  //   match on the parsed number + street name \u2014 a key lookup, no geometry.
+function resolveCivicIdentity(matchedLabel){
+  // Returns a rich identity object with all candidates + a confidence tier.
+  // NEVER silently collapses multiple candidates to one \u2014 the caller shows a
+  // picker when confidence is 'red'. Street names repeat across HRM (and within
+  // the Regional Centre), so identity must be PROVEN, not assumed.
   var c = state.civic;
-  if(!c || c.error || !matchedLabel) return Promise.resolve(null);
+  var empty = { pid:null, candidates:[], confidence:"red", reason:"Civic layer unavailable", community:"", geocoderCommunity:"" };
+  if(!c || c.error || !matchedLabel) return Promise.resolve(empty);
 
-  // Parse "89 PRINCE ALBERT RD, DARTMOUTH" -> num=89, streetwords=[PRINCE,ALBERT,RD]
-  var head = String(matchedLabel).split(",")[0].trim().toUpperCase();
+  var raw = String(matchedLabel).toUpperCase();
+  var head = raw.split(",")[0].trim();
+  var community = "";
+  var ci = raw.indexOf(",");
+  if(ci >= 0) community = raw.slice(ci+1).trim().replace(/\s+NS$|\s+NOVA SCOTIA$/,"").trim();
+
   var m = head.match(/^(\d+)\s+(.+)$/);
-  if(!m) return Promise.resolve(null);
+  if(!m) return Promise.resolve({ pid:null, candidates:[], confidence:"red",
+    reason:"Could not parse a civic number + street from the address", community:community, geocoderCommunity:community });
   var num = m[1];
   var rest = m[2].trim();
-  // Drop a trailing street-type token so STR_NAME matches ("PRINCE ALBERT").
-  var TYPES = /\b(RD|ROAD|ST|STREET|AVE|AVENUE|DR|DRIVE|CRES|CRESCENT|BLVD|LANE|LN|CT|COURT|PL|PLACE|WAY|TERR|HWY|PKWY|CIR|CIRCLE)\b\.?$/;
-  var streetName = rest.replace(TYPES, "").trim();
 
+  var TYPEMAP = {ROAD:"RD",RD:"RD",STREET:"ST",ST:"ST",AVENUE:"AVE",AVE:"AVE",
+    DRIVE:"DR",DR:"DR",CRESCENT:"CRES",CRES:"CRES",BOULEVARD:"BLVD",BLVD:"BLVD",
+    LANE:"LANE",LN:"LANE",COURT:"CRT",CRT:"CRT",CT:"CRT",PLACE:"PL",PL:"PL",
+    TERRACE:"TERR",TERR:"TERR",WAY:"WAY",HIGHWAY:"HWY",HWY:"HWY",
+    PARKWAY:"PKY",PKY:"PKY",CIRCLE:"CIR",CIR:"CIR",GROVE:"GRV",GRV:"GRV",
+    HEIGHTS:"HTS",HTS:"HTS",TRAIL:"TRL",TRL:"TRL",RUN:"RUN",LOOP:"LOOP",
+    GATE:"GATE",GREEN:"GRN",GRN:"GRN",HILL:"HILL",WALK:"WALK",DiV:"DIV"};
+  var toks = rest.split(/\s+/);
+  var strType = null;
+  if(toks.length > 1){
+    var last = toks[toks.length-1].replace(/\.$/,"");
+    if(TYPEMAP[last]){ strType = TYPEMAP[last]; toks.pop(); }
+  }
+  var streetName = toks.join(" ").trim();
+
+  // Query by number + name only, and inspect ALL candidates ourselves \u2014 this
+  // way we can see the full ambiguity rather than pre-filtering it away.
   var where = "CIV_NUM=" + num + " AND UPPER(STR_NAME)='" + esc(streetName) + "'";
-  var u = c.url + "/query?where=" + encodeURIComponent(where)
-    + "&outFields=PID,CIV_NUM,STR_NAME&returnGeometry=false&f=json";
-  return j(u).then(function(d){
-    var pids = (d.features||[]).map(function(f){ return f.attributes.PID; })
-      .filter(Boolean).map(String);
-    MULTI_PIDS = Array.from(new Set(pids));
-    return MULTI_PIDS.length ? MULTI_PIDS[0] : null;
-  }).catch(function(){ MULTI_PIDS = null; return null; });
+  var url = c.url + "/query?where=" + encodeURIComponent(where)
+    + "&outFields=PID,CIV_NUM,STR_NAME,STR_TYPE,GSA_NAME&returnGeometry=false&f=json";
+
+  return j(url).then(function(d){
+    var all = (d.features||[]).map(function(f){ return f.attributes; })
+      .filter(function(a){ return a.PID; });
+    // Dedupe by PID.
+    var seen = {}, cands = [];
+    all.forEach(function(a){ if(!seen[a.PID]){ seen[a.PID]=1; cands.push(a); } });
+
+    if(!cands.length){
+      return { pid:null, candidates:[], confidence:"red",
+        reason:"No civic record for " + num + " " + streetName + (community?(" in "+community):""),
+        community:community, geocoderCommunity:community };
+    }
+
+    // Narrow by community + street type where we have them.
+    function norm(v){ return String(v==null?"":v).toUpperCase().trim(); }
+    var byCommunity = community ? cands.filter(function(a){ return norm(a.GSA_NAME)===community; }) : cands;
+    var pool = byCommunity.length ? byCommunity : cands;
+    var byType = strType ? pool.filter(function(a){ return norm(a.STR_TYPE)===strType; }) : pool;
+    var narrowed = byType.length ? byType : pool;
+
+    MULTI_PIDS = cands.map(function(a){ return a.PID; });
+
+    // Decide confidence.
+    var conf, reason;
+    if(narrowed.length === 1){
+      if(cands.length === 1){ conf="green"; reason="Single exact civic match"; }
+      else if(community && strType && byType.length===1 && byCommunity.length){ conf="green"; reason="Disambiguated by community + street type"; }
+      else { conf="amber"; reason="Resolved to one parcel, but the address matched " + cands.length + " civic records \u2014 confirm this is the intended parcel"; }
+    } else {
+      conf="red";
+      reason=narrowed.length + " parcels match this address" + (community?(" in "+community):"") + " \u2014 select the correct one";
+    }
+
+    // Geocoder-vs-civic community cross-check.
+    var chosen = narrowed[0];
+    if(conf!=="red" && community && chosen && norm(chosen.GSA_NAME)!==community){
+      conf = "red";
+      reason = "Address community (" + community + ") does not match the resolved parcel community (" + norm(chosen.GSA_NAME) + ") \u2014 confirm the correct parcel";
+      narrowed = cands;
+    }
+
+    return {
+      pid: (conf==="red") ? null : (chosen ? chosen.PID : null),
+      candidates: (conf==="red") ? narrowed : [chosen],
+      allCandidates: cands,
+      confidence: conf, reason: reason,
+      community: community, geocoderCommunity: community,
+      streetName: streetName, strType: strType, civNum: num
+    };
+  }).catch(function(){ return empty; });
 }
 
 function fetchParcelGeom(x, y, knownPID){
@@ -736,7 +801,14 @@ function zoneAtParcel(parcelGeom){
 
 function finish(pt){
   var ll = mercToLatLon(pt.x, pt.y);
-  return resolveCivicPID(pt.label).then(function(civicPID){
+  return resolveCivicIdentity(pt.label).then(function(ident){
+  // SAFEGUARD: ambiguous identity \u2014 stop and let the planner choose. Nothing
+  // is analyzed until the correct parcel is confirmed.
+  if(ident.confidence === "red" && ident.candidates && ident.candidates.length > 1){
+    renderDisambiguation(pt, ident);
+    return;
+  }
+  var civicPID = ident.pid;
   return Promise.all([
     Promise.all(state.layers.map(function(L){ return queryLayer(L, pt.x, pt.y); })),
     fetchParcelGeom(pt.x, pt.y, civicPID)
@@ -786,6 +858,7 @@ function finish(pt){
         // evidence we're in-area; absence on all of them supports out-of-area.
         var rcSchedHit = hits.some(function(h){ return h.layer && h.layer.group==="builtform" && (h.attrs||h.features); });
         renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
+                       ident: ident,
                        inRC: inRegionalCentre, rcSchedHit: rcSchedHit, community: communityName,
                        parcelArea: areaM2,
                        areaField: (parcel && parcel.areaM2 != null) ? "AREAUNITS" : (pubArea ? pubArea.field : null),
@@ -892,6 +965,75 @@ function hitCard(h){
 }
 
 var LAST = null;
+
+function renderDisambiguation(pt, ident){
+  clearOut();
+  var rows = (ident.candidates||ident.allCandidates||[]).map(function(a,i){
+    var line = (a.CIV_NUM||"") + " " + (a.STR_NAME||"") + " " + (a.STR_TYPE||"")
+             + "  \u00b7  " + (a.GSA_NAME||"?") + "  \u00b7  PID " + a.PID;
+    return '<button class="cand" data-pid="'+escH(a.PID)+'" data-i="'+i+'">'+escH(line)+'</button>';
+  }).join("");
+  $("out").innerHTML =
+    '<div class="panel section" style="border-left:3px solid var(--wait)">'
+    + '<h3 style="color:#8a6d1b">\u26a0 Multiple parcels match \u2014 select the correct one</h3>'
+    + '<div class="muted" style="margin-bottom:8px">'+escH(ident.reason)+'. The tool will not analyze a parcel until you confirm which one is correct.</div>'
+    + rows + '</div>';
+  state._disamb = { pt:pt, ident:ident };
+  Array.prototype.forEach.call(document.querySelectorAll(".cand"), function(b){
+    b.onclick = function(){
+      var pid = b.getAttribute("data-pid");
+      var chosen = (ident.candidates||ident.allCandidates||[]).filter(function(a){ return a.PID===pid; })[0];
+      var forced = { pid:pid, candidates:[chosen], allCandidates:ident.allCandidates||[chosen],
+                     confidence:"amber", reason:"Parcel selected manually by planner",
+                     community:ident.community, geocoderCommunity:ident.geocoderCommunity,
+                     streetName:ident.streetName, strType:chosen?chosen.STR_TYPE:null, civNum:ident.civNum };
+      runResolvedIdentity(pt, forced);
+    };
+  });
+}
+
+function runResolvedIdentity(pt, ident){
+  clearOut();
+  $("go").disabled = true; $("go").textContent = "\u2026";
+  Promise.all([
+    Promise.all(state.layers.map(function(L){ return queryLayer(L, pt.x, pt.y); })),
+    fetchParcelGeom(pt.x, pt.y, ident.pid)
+  ]).then(function(res){
+    var hits = res[0].filter(Boolean);
+    var parcel = res[1];
+    var parcelGeom = parcel ? parcel.geometry : null;
+    if(parcel){
+      var pLayer = CATALOG.find(function(L){ return L.key==="parcel"; });
+      var pIdx = hits.findIndex(function(h){ return h.layer && h.layer.key==="parcel"; });
+      var nh = { layer:pLayer, attrs:parcel.attrs, buffered:false };
+      if(pIdx>=0) hits[pIdx]=nh; else hits.push(nh);
+    }
+    var zoneHit = hits.find(function(h){ return h.layer.key==="zoning"; });
+    var zonePromise = parcelGeom ? zoneAtParcel(parcelGeom) : Promise.resolve(null);
+    return zonePromise.then(function(zc){
+      if(zc && zoneHit){ zoneHit.attrs = zc.attrs; zoneHit.buffered=false; zoneHit._centroid=true; }
+      var ownZone = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
+      var ll = mercToLatLon(pt.x, pt.y);
+      return Promise.all([abuttingZones(parcelGeom, ownZone, pt.x, pt.y), nearbyApps(pt.x, pt.y), lookupPublishedArea(pt.x, pt.y, parcel?parcel.attrs:null)])
+        .then(function(extra){
+          var pubArea = extra[2];
+          var areaM2 = (parcel && parcel.areaM2 != null) ? parcel.areaM2 : (pubArea?pubArea.m2:null);
+          var communityName = ident.community || "";
+          var ctxText = hits.filter(function(h){ return h.layer && h.layer.group==="context"; })
+            .map(function(h){ return JSON.stringify(h.attrs||{}).toUpperCase(); }).join(" ");
+          var inRC = /REGIONAL CENTRE/.test(ctxText)
+            || (/HALIFAX|DARTMOUTH/.test(communityName) && !/BEDFORD|SACKVILLE|HAMMONDS|COLE HARBOUR|WAVERLEY|FALL RIVER|TIMBERLEA|HUBBARDS|MUSQUODOBOIT|PORTERS|EASTERN PASSAGE|EAST PRESTON|GAETZ/.test(communityName));
+          renderResult({ pt:pt, ll:ll, hits:hits, abut:extra[0], hasParcel:!!parcelGeom,
+                         ident:ident, inRC:inRC, community:communityName,
+                         parcelArea:areaM2,
+                         areaField:(parcel&&parcel.areaM2!=null)?"AREAUNITS":(pubArea?pubArea.field:null),
+                         apps:extra[1] });
+        });
+    });
+  }).catch(function(e){ showErr(e.message||"Lookup failed."); })
+    .then(function(){ $("go").disabled=false; $("go").textContent="Look up"; });
+}
+
 function renderResult(R){
   LAST = R;
   clearOut();
@@ -1026,7 +1168,7 @@ function buildIntakeText(R){
   var boundary = (R.abut && ((R.abut.diff && R.abut.diff.length) || (R.abut.parks && R.abut.parks.length))) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v35)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v37)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
