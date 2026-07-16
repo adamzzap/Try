@@ -110,7 +110,7 @@
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
 
-  <div class="foot"><span>tool v31 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+  <div class="foot"><span>tool v33 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
@@ -162,11 +162,20 @@ var CATALOG = [
   { key:"dsub",      svc:"Detailed_Plan_Sub_Areas",              group:"context",   label:"Detailed plan sub-area" },
   { key:"rgflu",     svc:"Regional_Plan_Generalized_Future_Land_Use", group:"context", label:"Regional Plan GFLU", hi:/DESIG/i },
 
+  { key:"transres",  svc:"RC_Transportation_Reserves",           group:"overlay",   label:"Transportation reserve (RC)" },
+  { key:"devagr",    svc:"Development_Agreements",               group:"overlay",   label:"Development agreement" },
+  { key:"ddprec",    svc:"RC_Downtown_Dartmouth_Precincts",      group:"context",   label:"Downtown Dartmouth precinct" },
+  { key:"smps",      svc:"RC_SMPS_Precincts",                    group:"context",   label:"SMPS precinct" },
+  { key:"lus",       svc:"Land_Use_Schedules",                   group:"context",   label:"Land use schedule" },
+  { key:"stclass",   svc:"StreetNetwork",                        group:"context",   label:"Nearest street (classification)", hi:/^ST_CLASS$/ },
+  { key:"bldg",      svc:"Buildings",                            group:"context",   label:"Existing building footprint" },
+
   { key:"parcel",    svc:"HRM_Parcel_Polygon_with_Accounts",     group:"parcel",    label:"Parcel" }
 ];
 var APPS_SVC = ORG + "/PPLC_Planning_Applications_Geolocated/FeatureServer/0";
 var STREETS_SVC = null;  // resolved at boot by scanning the org directory for a street/centreline layer
 var AREA_LAYER = null;   // {url, field, unit} resolved at boot: the layer that publishes lot area
+var MULTI_PIDS = null;   // distinct PIDs found at the last civic-address match (planner flag when >1)
 
 // Built-form values that are text-only (no GIS layer) — verified entries join by zone.
 var REGS = {
@@ -208,17 +217,6 @@ function boot(){
     state.network = true;
     // Resolve the street-centreline service by name (varies: Street_Centrelines,
     // StreetCentreLines, Road_Segments, etc.) so across-road classification works.
-    try{
-      var svcList = dir.services||[];
-      // Exact/most-specific first, and NEVER a slope/contour/analysis layer
-      // (a prior version wrongly grabbed "Average_Street_Slope").
-      var bad = /slope|contour|elevation|width|light|sweep|clean|snow|slow|speed|park|truck|transit|bus|name.?route/i;
-      var svc =
-        svcList.find(function(x){ return /^Street_?Centre?lines?$/i.test(x.name); }) ||
-        svcList.find(function(x){ return /street.?centre?line|road.?centre?line/i.test(x.name) && !bad.test(x.name); }) ||
-        svcList.find(function(x){ return /street.?network|road.?network|road.?segment|street.?segment/i.test(x.name) && !bad.test(x.name); });
-      if(svc) STREETS_SVC = ORG + "/" + svc.name + "/" + svc.type + "/0";
-    }catch(e){}
     var areaScan = discoverAreaLayer(dir);
     return Promise.all([areaScan, Promise.all(CATALOG.map(prepLayer))]).then(function(){
       var ok = CATALOG.filter(function(L){ return L.ok; });
@@ -445,9 +443,11 @@ function resolveCivicPID(matchedLabel){
   var u = c.url + "/query?where=" + encodeURIComponent(where)
     + "&outFields=PID,CIV_NUM,STR_NAME&returnGeometry=false&f=json";
   return j(u).then(function(d){
-    var f = d.features && d.features[0];
-    return f && f.attributes.PID ? String(f.attributes.PID) : null;
-  }).catch(function(){ return null; });
+    var pids = (d.features||[]).map(function(f){ return f.attributes.PID; })
+      .filter(Boolean).map(String);
+    MULTI_PIDS = Array.from(new Set(pids));
+    return MULTI_PIDS.length ? MULTI_PIDS[0] : null;
+  }).catch(function(){ MULTI_PIDS = null; return null; });
 }
 
 function fetchParcelGeom(x, y, knownPID){
@@ -551,96 +551,29 @@ function ringAreaM2(geom, yMerc){
   return Math.abs(a/2) * k * k;
 }
 
+var PARK_CODES = /^(PCF|OS|OSP|PK|POS)$/i;  // park / open-space zone codes (RC LUB)
+
 function abuttingZones(parcelGeom, ownZone, px, py){
-  // Point-based 30 m scan (this path reliably returns neighbours, unlike the
-  // parcel-polygon query). Each differing zone is then classified: if a street
-  // centreline runs between it and the site, it's "across the road" (flagged,
-  // not applicable); otherwise it's a true abutter.
+  // Report zones near the subject parcel, split into differing zones and parks.
+  // No across-the-road classification \u2014 the tool flags what to confirm on
+  // the zoning overlay rather than asserting a property-line-vs-street call it
+  // cannot make reliably.
   var Z = CATALOG.find(function(L){ return L.key==="zoning" && L.ok; });
-  if(!Z || px==null || py==null) return Promise.resolve({abutters:[], acrossRoad:[], method:"none"});
+  if(!Z || px==null || py==null) return Promise.resolve({diff:[], parks:[], method:"none"});
   var zf = Z.hiField || "ZONE";
   var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
   var body = "geometry=" + encodeURIComponent(geom)
     + "&geometryType=esriGeometryPoint&inSR=102100"
     + "&spatialRel=esriSpatialRelIntersects&distance=30&units=esriSRUnit_Meter"
-    + "&outFields=" + zf + "&returnGeometry=true&outSR=102100&f=json";
-
+    + "&outFields=" + zf + "&returnDistinctValues=true&returnGeometry=false&f=json";
   return j(Z.url + "/query?" + body).then(function(d){
-    var feats = (d.features||[]).filter(function(f){
-      return f.attributes[zf] && f.attributes[zf] !== ownZone;
-    });
-    if(!feats.length) return {abutters:[], acrossRoad:[], method:"none"};
-
-    // Classify each differing zone by whether a street sits between it and the point.
-    return fetchStreetsNearPoint(px, py).then(function(streets){
-      var abutters = [], across = [];
-      feats.forEach(function(f){
-        var z = f.attributes[zf];
-        var isAcross = streets && streetBetweenPoint(px, py, f.geometry, streets);
-        if(isAcross){ if(across.indexOf(z)<0) across.push(z); }
-        else { if(abutters.indexOf(z)<0) abutters.push(z); }
-      });
-      return { abutters:abutters, acrossRoad:across, method: streets?"classified":"unclassified" };
-    });
-  }).catch(function(){ return {abutters:[], acrossRoad:[], method:"failed"}; });
-}
-
-function fetchStreetsNearPoint(px, py){
-  if(!STREETS_SVC) return Promise.resolve(null);
-  var geom = JSON.stringify({x:px,y:py,spatialReference:{wkid:102100}});
-  var body = "geometry=" + encodeURIComponent(geom)
-    + "&geometryType=esriGeometryPoint&inSR=102100"
-    + "&spatialRel=esriSpatialRelIntersects&distance=40&units=esriSRUnit_Meter"
-    + "&outFields=OBJECTID&returnGeometry=true&outSR=102100&f=json";
-  return j(STREETS_SVC + "/query?" + body).then(function(d){
-    return (d.features||[]).map(function(f){ return f.geometry; }).filter(Boolean);
-  }).catch(function(){ return null; });
-}
-
-// A zone is "across the road" if a street centreline passes between the site
-// point and that zone: i.e. some centreline vertex lies between the point and
-// the zone \u2014 close to the zone's edge AND with the point on the opposite side.
-// Simple robust proxy: a centreline vertex within ~10 m of BOTH the point and
-// the zone polygon edge means the road runs along their shared frontage.
-function streetBetweenPoint(px, py, zoneGeom, streets){
-  // A zone is "across the road" if a street centreline runs between the site
-  // point and that zone. HRM street segments are long polylines with sparse
-  // vertices, so we SAMPLE points densely along each segment (not just its
-  // vertices) and test whether any sample sits close to both the site point and
-  // the candidate zone's edge \u2014 i.e. the road lies between them.
-  var NEAR = 14, near2 = NEAR*NEAR;   // metres tolerance to point and to zone edge
-  var STEP = 4;                        // sample the centreline every ~4 m
-  if(!zoneGeom || !zoneGeom.rings) return false;
-  for(var s=0;s<streets.length;s++){
-    var paths = (streets[s] && streets[s].paths) || [];
-    for(var p=0;p<paths.length;p++){
-      var pts = paths[p];
-      for(var i=0;i<pts.length-1;i++){
-        var ax=pts[i][0], ay=pts[i][1], bx=pts[i+1][0], by=pts[i+1][1];
-        var segLen = Math.sqrt((bx-ax)*(bx-ax)+(by-ay)*(by-ay)) || 0;
-        var n = Math.max(1, Math.ceil(segLen/STEP));
-        for(var k=0;k<=n;k++){
-          var t = k/n;
-          var x = ax + (bx-ax)*t, y = ay + (by-ay)*t;
-          var dPt = (x-px)*(x-px) + (y-py)*(y-py);
-          if(dPt < near2 && distToRings(x,y,zoneGeom.rings) < near2) return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
-function distToRings(x,y,rings){
-  var min = Infinity;
-  for(var r=0;r<rings.length;r++){
-    var ring = rings[r];
-    for(var i=0;i<ring.length;i++){
-      var dx=ring[i][0]-x, dy=ring[i][1]-y, d=dx*dx+dy*dy;
-      if(d<min) min=d;
-    }
-  }
-  return min;
+    var zones = (d.features||[]).map(function(f){ return f.attributes[zf]; })
+      .filter(function(z){ return z && z !== ownZone; });
+    zones = Array.from(new Set(zones));
+    var parks = zones.filter(function(z){ return PARK_CODES.test(String(z).trim()); });
+    var diff  = zones.filter(function(z){ return !PARK_CODES.test(String(z).trim()); });
+    return { diff:diff, parks:parks, method:"nearby" };
+  }).catch(function(){ return {diff:[], parks:[], method:"failed"}; });
 }
 
 function nearbyApps(x, y){
@@ -866,9 +799,18 @@ function heightCard(h){
     valHtml = '<div class="muted">No height or storey value returned.</div>';
     note = "";
   }
+  // Provenance straight off the layer record \u2014 amendment source + edit date.
+  var rec = storeyRec || metreRec;
+  var prov = "";
+  if(rec && (rec.SOURCE || rec.MODDATE)){
+    var bits = [];
+    if(rec.SOURCE) bits.push("source: " + rec.SOURCE);
+    if(rec.MODDATE) bits.push("modified: " + new Date(rec.MODDATE).toISOString().slice(0,10));
+    prov = '<div class="hit-note">Layer record \u2014 ' + escH(bits.join(" \u00b7 ")) + '</div>';
+  }
   return '<div class="hit"><div class="hit-label">'+escH(h.layer.label)
     + (h.buffered?' <span class="hit-note">(nearest)</span>':'') + '</div>'
-    + valHtml + note + '</div>';
+    + valHtml + note + prov + '</div>';
 }
 
 function hitCard(h){
@@ -925,28 +867,26 @@ function renderResult(R){
   var cx = byGroup("context");
   var cxHtml = cx.length ? cx.map(hitCard).join("") : '<div class="muted">No plan-context polygons returned.</div>';
 
-var abut = R.abut || {abutters:[], acrossRoad:[], method:"none"};
+var abut = R.abut || {diff:[], parks:[], method:"none"};
   var abutHtml;
   if(!R.hasParcel){
-    abutHtml = '<div class="muted" style="color:#A9791B">Subject parcel polygon not found \u2014 abutting-zone check unavailable. Confirm abutters from the zoning screenshot.</div>';
+    abutHtml = '<div class="muted" style="color:#A9791B">Subject parcel not resolved \u2014 confirm abutters from the zoning screenshot.</div>';
   } else {
-    var parts = "";
-    if(abut.abutters && abut.abutters.length){
-      parts += abut.abutters.map(function(z){ return '<span class="chip">'+escH(z)+'</span>'; }).join("")
-        + '<div class="muted">Differing zone(s) sharing this lot\u2019s property line (true abutters). May trigger Table 14 buffer / side-setback / stepback \u2014 confirm per-lot-line on the zoning screenshot.</div>';
+    var hasDiff = abut.diff && abut.diff.length;
+    var hasPark = abut.parks && abut.parks.length;
+    if(hasDiff || hasPark){
+      var chips = [];
+      (abut.diff||[]).forEach(function(z){ chips.push('<span class="chip">'+escH(z)+'</span>'); });
+      (abut.parks||[]).forEach(function(z){ chips.push('<span class="chip" style="background:#E8F0E4;color:#2F6B33">'+escH(z)+' (park)</span>'); });
+      abutHtml = '<div class="hit-val" style="font-size:14px">Differing zone or park abutting? \u2014 YES <span style="color:var(--wait)">\u26a0 confirm on map</span></div>'
+        + '<div style="margin:6px 0">' + chips.join("") + '</div>'
+        + '<div class="muted">In contact or nearby (within 30 m). Confirm on the zoning overlay whether each shares a property line or sits across a street.</div>'
+        + (hasDiff ? '<div class="muted">\u2022 Differing zone \u2014 if it shares a property line, may trigger Table 14 buffer / side-setback / stepback (most relevant in ER contexts).</div>' : '')
+        + (hasPark ? '<div class="muted">\u2022 <b>Park abutter</b> \u2014 shadow / overshadowing analysis likely; check amenity-space and setback interface.</div>' : '');
+    } else {
+      abutHtml = '<div class="hit-val" style="font-size:14px">Differing zone or park abutting? \u2014 NO</div>'
+        + '<div class="muted">All parcels nearby carry the same zone; no park abutter. No Table 14 buffer or shadow trigger on zoning grounds.</div>';
     }
-    if(abut.acrossRoad && abut.acrossRoad.length){
-      parts += abut.acrossRoad.map(function(z){
-        return '<span class="chip" style="background:#EEE;color:#5B6A74">'+escH(z)+'</span>';
-      }).join("")
-        + '<div class="muted">Across the road \u2014 not applicable. Separated from the subject parcel by a street; does not abut for buffer/setback purposes.</div>';
-    }
-    if(!parts){
-      parts = (abut.method==="touches-only")
-        ? '<div class="muted">Touching zones found but the street layer couldn\u2019t be read to classify them \u2014 confirm abutters from the zoning screenshot.</div>'
-        : '<div class="muted">All parcels abutting this lot carry the same zone \u2014 no differing abutting zone. No Table 14 buffer triggered on zoning grounds.</div>';
-    }
-    abutHtml = parts;
   }
 
   var appsHtml;
@@ -1008,10 +948,10 @@ function copyCutSheet(){
   var zoneHit = hitsBy("zone")[0];
   var zoneVal = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
   var pid = state.civic && state.civic.pidField && R.pt.attrs ? R.pt.attrs[state.civic.pidField] : null;
-  var boundary = (R.abut && R.abut.abutters && R.abut.abutters.length) ? true : false;
+  var boundary = (R.abut && ((R.abut.diff && R.abut.diff.length) || (R.abut.parks && R.abut.parks.length))) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
 
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v31)\n";
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v33)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
 
   t += "SITE\n";
@@ -1069,15 +1009,17 @@ function copyCutSheet(){
   });
   t += "\n";
 
-  var abut = R.abut || {abutters:[], acrossRoad:[]};
-  var hasAbut = abut.abutters && abut.abutters.length;
+  var abut = R.abut || {diff:[], parks:[]};
+  var hasDiff = abut.diff && abut.diff.length;
+  var hasPark = abut.parks && abut.parks.length;
   if(!R.hasParcel){
-    t += "ABUTTING ZONES: parcel geometry unavailable \u2014 read from screenshot\n";
+    t += "ABUTTING (differing zone / park): parcel not resolved \u2014 read from screenshot\n";
+  } else if(hasDiff || hasPark){
+    t += "ABUTTING (differing zone or park)? YES \u2014 CONFIRM ON MAP\n";
+    if(hasDiff) t += "  differing zone(s) nearby: " + abut.diff.join(", ") + "  [confirm property-line vs across-street; Table 14 buffer / side-setback / stepback]\n";
+    if(hasPark) t += "  park zone(s) nearby: " + abut.parks.join(", ") + "  [SHADOW / overshadowing analysis; amenity-space + setback interface]\n";
   } else {
-    t += "ABUTTING ZONES (share property line): " + (hasAbut ? abut.abutters.join(", ") : "none differing \u2014 all abutters same zone") + "\n";
-    if(abut.acrossRoad && abut.acrossRoad.length){
-      t += "  across the road (not applicable): " + abut.acrossRoad.join(", ") + "\n";
-    }
+    t += "ABUTTING (differing zone or park)? NO \u2014 all nearby parcels same zone; no park.\n";
   }
   if(R.apps && R.apps.length){
     t += "NEARBY APPLICATIONS (" + APPS_BUFFER_M + " m): " + R.apps.length + " \u2014 see tool output\n";
@@ -1092,9 +1034,32 @@ function copyCutSheet(){
   t += "- Abutter zones per side: tool reports zones within " + ADJ_BUFFER_M + " m, not per-lot-line \u2014 confirm from zoning screenshot\n\n";
 
   t += "VERIFICATION FLAGS\n";
-  if(boundary) t += "- DIFFERING ABUTTER: a parcel sharing this lot\u2019s boundary carries a different zone \u2014 check Table 14 buffer / side-setback interaction; confirm per-lot-line from zoning screenshot\n";
+  if(boundary) t += "- DIFFERING ZONE / PARK NEARBY: confirm on the zoning overlay whether it abuts (property line) or sits across a street; differing zone \u2192 Table 14 buffer / side-setback / stepback, park \u2192 shadow analysis\n";
   if(anyBuffered) t += "- BUFFERED READ: one or more schedule values matched by proximity, not exact point \u2014 verify at parcel scale\n";
   if(!boundary && !anyBuffered) t += "- None \u2014 clean point reads; screenshots optional per rev-4\n";
+
+  t += "\nPLANNER REVIEW REQUIRED\n";
+  var zoneStr = String(zoneVal||"").toUpperCase();
+  if(/^ER/.test(zoneStr)){
+    t += "- Schedule 3C special-area status (ER zone): parcel-scale screenshot required\n";
+  }
+  var comm = "";
+  var lbl = String(R.pt.label||"").toUpperCase();
+  var ci = lbl.indexOf(",");
+  if(ci >= 0) comm = lbl.slice(ci+1).trim();
+  if(comm && comm.indexOf("HALIFAX") >= 0){
+    t += "- Halifax address: confirm Sched 21 Citadel ramparts and downtown view planes at parcel scale\n";
+  } else if(comm){
+    t += "- Sched 21 ramparts / downtown view planes: not applicable \u2014 community " + comm + "\n";
+  }
+  if(MULTI_PIDS && MULTI_PIDS.length > 1){
+    t += "- MULTIPLE PIDs at this civic address (" + MULTI_PIDS.join(", ") + "): planner to confirm subject parcel\n";
+  }
+  var dead = CATALOG.filter(function(L){ return !L.ok; });
+  if(dead.length){
+    t += "- NOT CHECKED (layer unreachable \u2014 verify by other means): " + dead.map(function(L){ return L.label; }).join("; ") + "\n";
+  }
+  t += "- Side/rear setbacks, lot coverage, min lot area/frontage: LUB text \u2014 planner to confirm (not GIS-mapped)\n";
 
   navigator.clipboard && navigator.clipboard.writeText(t);
   var b = $("copy"); b.textContent = "Copied"; setTimeout(function(){ b.textContent = "Copy intake"; },1400);
@@ -1111,8 +1076,8 @@ function renderAdv(){
   lines.push("");
   lines.push("civic: " + (c.url ? "ok  PID:"+(c.pidField||"?")+"  addr:"+((c.addrFields||[]).join(",")||"?") : (c.error||"?")));
   lines.push("geocoder: " + (state.geoOK===null?"probing":state.geoOK?"reachable":"blocked (civic fallback)"));
-  lines.push("streets layer: " + (STREETS_SVC||"NOT RESOLVED \u2014 across-road classification off"));
   var pL = CATALOG.find(function(L){ return L.key==="parcel"; });
+  lines.push("multi-PID at last address: " + (MULTI_PIDS && MULTI_PIDS.length ? MULTI_PIDS.join(",") : "n/a"));
   lines.push("lot area source: parcel AREAUNITS string (value+unit parsed)" + (AREA_LAYER ? "; fallback layer: " + AREA_LAYER.url : ""));
   $("adv").textContent = lines.join("\n");
 }
