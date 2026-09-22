@@ -87,14 +87,14 @@
   <div class="eyebrow">Halifax Regional Municipality &middot; Open GIS</div>
   <h1>Planning Cut-Sheet Lookup</h1>
   <p class="sub">Address or PID &rarr; zone, mapped LUB schedules (heights, yards, FAR, streetwall), overlays, plan context, adjacent zones, and nearby applications &mdash; all queried live.</p>
-
+ 
   <div class="panel strip" id="strip">
     <div class="stat"><span class="dot" id="d-layers"></span><span id="l-layers">Layers</span></div>
     <div class="stat"><span class="dot" id="d-civic"></span>Civic</div>
     <div class="stat"><span class="dot" id="d-geo"></span>Geocoder</div>
     <button class="adv-toggle" id="advBtn" style="margin-left:auto">Details</button>
   </div>
-
+ 
   <div class="panel search">
     <div class="modes">
       <button class="mode on" data-mode="address" id="m-address">Address</button>
@@ -105,16 +105,16 @@
       <button class="go" id="go">Look up</button>
     </div>
   </div>
-
+ 
   <div id="out"></div>
   <div class="empty" id="empty">Resolving HRM layers&hellip;</div>
   <div class="adv" id="adv" style="display:none"></div>
-
-  <div class="foot"><span>tool v37 &middot; 2026-07-14</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
+ 
+  <div class="foot"><span>tool v38 &middot; 2026-09-22</span><span>data &copy; HRM Open Data &middot; unofficial</span></div>
 </div>
 <script>
 "use strict";
-
+ 
 // ===========================================================================
 // CONFIG
 // ===========================================================================
@@ -128,23 +128,23 @@ var APPS_BUFFER_M = 150;  // nearby planning applications radius
 // Paste your cut-sheet Claude Project URL here (open the project in claude.ai
 // and copy the address bar, e.g. "https://claude.ai/project/xxxxxxxx").
 var CUTSHEET_PROJECT_URL = "https://claude.ai/projects";
-
+ 
 // The layer catalog — everything useful found in HRM's services directory.
 // group: zone | builtform | overlay | context | parcel
 // hi: regex for the headline field to feature; status "draft" gets flagged.
 var CATALOG = [
   { key:"zoning",    svc:"ZoningBoundaries",                     group:"zone",      label:"Zone (adopted LUB)", hi:/^ZONE$/i },
-
+ 
   { key:"maxhgt",    svc:"Maximum_Building_Heights",             group:"builtform", label:"Sched 15 \u2014 Max building height", hi:/MAXBLDHGT/i, heightLayer:true, multi:true },
   { key:"prebonus",  svc:"Pre_Bonus_Building_Height",            group:"builtform", label:"Pre-bonus height (downtown)", hi:/HGT|HEIGHT/i },
   { key:"postbonus", svc:"Post_Bonus_Building_Height",           group:"builtform", label:"Post-bonus height (downtown)", hi:/HGT|HEIGHT/i },
   { key:"far",       svc:"RC_Maximum_Floor_Area_Ratio",          group:"builtform", label:"Sched 17 \u2014 Max floor area ratio", hi:/FAR|RATIO/i },
-  { key:"minyard",   svc:"RC_Minimum_Front_and_Flanking_Yards",  group:"builtform", label:"Sched 18 \u2014 Min front/flanking setback (streetlines only)", hi:/YARD|MIN|SETBACK/i },
-  { key:"maxyard",   svc:"RC_Maximum_Front_and_Flanking_Yards",  group:"builtform", label:"Sched 19 \u2014 Max front/flanking setback (streetlines only)", hi:/YARD|MAX|SETBACK/i },
-  { key:"minyard2",  svc:"Minimum_Front_and_Flanking_Yards",     group:"builtform", label:"Min front/flanking setback (non-RC schedule)", hi:/YARD|MIN|SETBACK/i },
+  { key:"minyard",   svc:"RC_Minimum_Front_and_Flanking_Yards",  group:"builtform", label:"Sched 18 \u2014 Min front/flanking setback (streetlines only)", hi:/^MINBLDSBK$/i, unit:" m" },
+  { key:"maxyard",   svc:"RC_Maximum_Front_and_Flanking_Yards",  group:"builtform", label:"Sched 19 \u2014 Max front/flanking setback (streetlines only)", hi:/^MAXBLDSBK$/i, unit:" m" },
+  { key:"minyard2",  svc:"Minimum_Front_and_Flanking_Yards",     group:"builtform", label:"Min front/flanking setback (non-RC schedule)", hi:/^MINBLDSBK$/i, unit:" m", bylaw:true },
   { key:"stwall",    svc:"RC_Maximum_Streetwall_Heights",        group:"builtform", label:"Max streetwall height (RC)", hi:/HGT|HEIGHT|WALL/i },
   { key:"hgtprec",   svc:"Height_Precincts",                     group:"builtform", label:"Height precinct (downtown)", hi:/HGT|HEIGHT|PRECINCT/i },
-
+ 
   { key:"spa",       svc:"Special_Planning_Areas",               group:"overlay",   label:"Special Planning Area" },
   { key:"rcspecial", svc:"RC_Special_Area_Boundary",             group:"overlay",   label:"RC Special Area" },
   { key:"sitepa",    svc:"RC_Site_Plan_Approval_Areas",          group:"overlay",   label:"Site Plan Approval Area (RC)" },
@@ -159,12 +159,12 @@ var CATALOG = [
   { key:"trans",     svc:"RC_Transition_Lines",                  group:"overlay",   label:"Transition line (RC)", buffer:LINE_BUFFER_M },
   { key:"viewpl",    svc:"View_Planes",                          group:"overlay",   label:"View plane" },
   { key:"viewcor",   svc:"RC_LUB_View_Corridors",                group:"overlay",   label:"View corridor (RC LUB)" },
-
+ 
   { key:"cplan",     svc:"Community_Plan_Areas",                 group:"context",   label:"Community plan area" },
   { key:"dplan",     svc:"Detailed_Plan_Areas",                  group:"context",   label:"Detailed plan area" },
   { key:"dsub",      svc:"Detailed_Plan_Sub_Areas",              group:"context",   label:"Detailed plan sub-area" },
   { key:"rgflu",     svc:"Regional_Plan_Generalized_Future_Land_Use", group:"context", label:"Regional Plan GFLU", hi:/DESIG/i },
-
+ 
   { key:"transres",  svc:"RC_Transportation_Reserves",           group:"overlay",   label:"Transportation reserve (RC)" },
   { key:"devagr",    svc:"Development_Agreements",               group:"overlay",   label:"Development agreement" },
   { key:"ddprec",    svc:"RC_Downtown_Dartmouth_Precincts",      group:"context",   label:"Downtown Dartmouth precinct" },
@@ -172,14 +172,14 @@ var CATALOG = [
   { key:"lus",       svc:"Land_Use_Schedules",                   group:"context",   label:"Land use schedule" },
   { key:"stclass",   svc:"StreetNetwork",                        group:"context",   label:"Nearest street (classification)", hi:/^ST_CLASS$/ },
   { key:"bldg",      svc:"Buildings",                            group:"context",   label:"Existing building footprint" },
-
+ 
   { key:"parcel",    svc:"HRM_Parcel_Polygon_with_Accounts",     group:"parcel",    label:"Parcel" }
 ];
 var APPS_SVC = ORG + "/PPLC_Planning_Applications_Geolocated/FeatureServer/0";
 var STREETS_SVC = null;  // resolved at boot by scanning the org directory for a street/centreline layer
 var AREA_LAYER = null;   // {url, field, unit} resolved at boot: the layer that publishes lot area
 var MULTI_PIDS = null;   // distinct PIDs found at the last civic-address match (planner flag when >1)
-
+ 
 // Built-form values that are text-only (no GIS layer) — verified entries join by zone.
 var REGS = {
   "COR": {
@@ -188,7 +188,7 @@ var REGS = {
     cite: "HRM Regional Centre LUB \u2014 verify tables & schedules before use."
   }
 };
-
+ 
 // ===========================================================================
 var state = { mode:"address", network:null, layers:[], civic:null, geoOK:null, candidates:null, apps:true };
 var $ = function(id){ return document.getElementById(id); };
@@ -210,7 +210,7 @@ function j(url){
     return d;
   });
 }
-
+ 
 // ---------------------------------------------------------------------------
 // BOOT
 // ---------------------------------------------------------------------------
@@ -242,7 +242,7 @@ function boot(){
     renderAdv();
   });
 }
-
+ 
 function discoverAreaLayer(dir){
   // Find the layer ExploreHRM uses for its property popup: a parcel/property
   // layer whose fields include a published lot-area size (field name or alias
@@ -288,7 +288,7 @@ function discoverAreaLayer(dir){
   });
   return chain;
 }
-
+ 
 function prepLayer(L){
   L.url = ORG + "/" + L.svc + "/FeatureServer/" + (L.layerId!=null ? L.layerId : 0);
   return j(L.url + "?f=json").then(function(meta){
@@ -323,7 +323,7 @@ function prepLayer(L){
     L.ok = true;
   }).catch(function(e){ L.ok = false; L.err = e.message; });
 }
-
+ 
 function prepCivic(){
   return j(CIVIC_URL + "?f=json").then(function(meta){
     var fields = (meta.fields||[]).map(function(f){ return f.name; });
@@ -335,12 +335,12 @@ function prepCivic(){
     setDot("d-civic","live");
   }).catch(function(e){ state.civic = {error:e.message}; setDot("d-civic","down"); });
 }
-
+ 
 function probeGeocoder(){
   j(GEOCODER + "?f=json").then(function(){ state.geoOK = true; setDot("d-geo","live"); renderAdv(); })
     .catch(function(){ state.geoOK = false; setDot("d-geo","down"); renderAdv(); });
 }
-
+ 
 // ---------------------------------------------------------------------------
 // QUERIES
 // ---------------------------------------------------------------------------
@@ -352,7 +352,7 @@ function pointQueryUrl(layerUrl, x, y, bufferM, extra){
   if(bufferM) u += "&distance=" + bufferM + "&units=esriSRUnit_Meter";
   return u;
 }
-
+ 
 function queryLayer(L, x, y){
   // Stage 1: EXACT point, no buffer. This returns only the polygon the point
   // truly falls inside \u2014 critical near zone boundaries (e.g. COR abutting
@@ -369,10 +369,10 @@ function queryLayer(L, x, y){
     }
     var f = d.features && d.features[0];
     if(f) return {layer:L, attrs:f.attributes, buffered:false};
-
+ 
     // Overlays/context: an exact miss means the layer genuinely doesn't apply.
     if(L.group==="overlay" || L.group==="context") return null;
-
+ 
     // Stage 2 (zone / builtform / parcel only): the point may sit on the road
     // right-of-way, which isn't zoned. Retry with a buffer, but return the
     // NEAREST polygon, not the first \u2014 so a boundary straddle still yields
@@ -393,7 +393,7 @@ function queryLayer(L, x, y){
     }).catch(function(){ return null; });
   }).catch(function(){ return null; });
 }
-
+ 
 // Minimum distance from point (x,y) to any vertex of a polygon's rings.
 // Good enough to rank which candidate polygon is closest to the point.
 function nearestRingDist(geom, x, y){
@@ -408,7 +408,7 @@ function nearestRingDist(geom, x, y){
   });
   return min;
 }
-
+ 
 function parseAreaUnits(str){
   // HRM stores lot area as ONE text string: "<value> <unit>", e.g.
   // "345 Square Metres", "1 Square Feet", "0.5 Acres". Parse to m2.
@@ -423,7 +423,7 @@ function parseAreaUnits(str){
   if(/hectare|^ha/.test(u))return v * 10000;
   return v; // metres
 }
-
+ 
 function resolveCivicIdentity(matchedLabel){
   // Returns a rich identity object with all candidates + a confidence tier.
   // NEVER silently collapses multiple candidates to one \u2014 the caller shows a
@@ -432,19 +432,19 @@ function resolveCivicIdentity(matchedLabel){
   var c = state.civic;
   var empty = { pid:null, candidates:[], confidence:"red", reason:"Civic layer unavailable", community:"", geocoderCommunity:"" };
   if(!c || c.error || !matchedLabel) return Promise.resolve(empty);
-
+ 
   var raw = String(matchedLabel).toUpperCase();
   var head = raw.split(",")[0].trim();
   var community = "";
   var ci = raw.indexOf(",");
   if(ci >= 0) community = raw.slice(ci+1).trim().replace(/\s+NS$|\s+NOVA SCOTIA$/,"").trim();
-
+ 
   var m = head.match(/^(\d+)\s+(.+)$/);
   if(!m) return Promise.resolve({ pid:null, candidates:[], confidence:"red",
     reason:"Could not parse a civic number + street from the address", community:community, geocoderCommunity:community });
   var num = m[1];
   var rest = m[2].trim();
-
+ 
   var TYPEMAP = {ROAD:"RD",RD:"RD",STREET:"ST",ST:"ST",AVENUE:"AVE",AVE:"AVE",
     DRIVE:"DR",DR:"DR",CRESCENT:"CRES",CRES:"CRES",BOULEVARD:"BLVD",BLVD:"BLVD",
     LANE:"LANE",LN:"LANE",COURT:"CRT",CRT:"CRT",CT:"CRT",PLACE:"PL",PL:"PL",
@@ -459,35 +459,35 @@ function resolveCivicIdentity(matchedLabel){
     if(TYPEMAP[last]){ strType = TYPEMAP[last]; toks.pop(); }
   }
   var streetName = toks.join(" ").trim();
-
+ 
   // Query by number + name only, and inspect ALL candidates ourselves \u2014 this
   // way we can see the full ambiguity rather than pre-filtering it away.
   var where = "CIV_NUM=" + num + " AND UPPER(STR_NAME)='" + esc(streetName) + "'";
   var url = c.url + "/query?where=" + encodeURIComponent(where)
     + "&outFields=PID,CIV_NUM,STR_NAME,STR_TYPE,GSA_NAME&returnGeometry=false&f=json";
-
+ 
   return j(url).then(function(d){
     var all = (d.features||[]).map(function(f){ return f.attributes; })
       .filter(function(a){ return a.PID; });
     // Dedupe by PID.
     var seen = {}, cands = [];
     all.forEach(function(a){ if(!seen[a.PID]){ seen[a.PID]=1; cands.push(a); } });
-
+ 
     if(!cands.length){
       return { pid:null, candidates:[], confidence:"red",
         reason:"No civic record for " + num + " " + streetName + (community?(" in "+community):""),
         community:community, geocoderCommunity:community };
     }
-
+ 
     // Narrow by community + street type where we have them.
     function norm(v){ return String(v==null?"":v).toUpperCase().trim(); }
     var byCommunity = community ? cands.filter(function(a){ return norm(a.GSA_NAME)===community; }) : cands;
     var pool = byCommunity.length ? byCommunity : cands;
     var byType = strType ? pool.filter(function(a){ return norm(a.STR_TYPE)===strType; }) : pool;
     var narrowed = byType.length ? byType : pool;
-
+ 
     MULTI_PIDS = cands.map(function(a){ return a.PID; });
-
+ 
     // Decide confidence.
     var conf, reason;
     if(narrowed.length === 1){
@@ -498,7 +498,7 @@ function resolveCivicIdentity(matchedLabel){
       conf="red";
       reason=narrowed.length + " parcels match this address" + (community?(" in "+community):"") + " \u2014 select the correct one";
     }
-
+ 
     // Geocoder-vs-civic community cross-check.
     var chosen = narrowed[0];
     if(conf!=="red" && community && chosen && norm(chosen.GSA_NAME)!==community){
@@ -506,7 +506,7 @@ function resolveCivicIdentity(matchedLabel){
       reason = "Address community (" + community + ") does not match the resolved parcel community (" + norm(chosen.GSA_NAME) + ") \u2014 confirm the correct parcel";
       narrowed = cands;
     }
-
+ 
     return {
       pid: (conf==="red") ? null : (chosen ? chosen.PID : null),
       candidates: (conf==="red") ? narrowed : [chosen],
@@ -517,7 +517,7 @@ function resolveCivicIdentity(matchedLabel){
     };
   }).catch(function(){ return empty; });
 }
-
+ 
 function fetchParcelGeom(x, y, knownPID){
   // Get the subject parcel polygon at the point (full geometry, for adjacency)
   // and its published AREAUNITS. Two-stage like the other layers: exact point
@@ -526,7 +526,7 @@ function fetchParcelGeom(x, y, knownPID){
   // feet from a geocoded street-address point on an irregular lot.
   var P = CATALOG.find(function(L){ return L.key==="parcel" && L.ok; });
   if(!P) return Promise.resolve(null);
-
+ 
   function byPID(pid){
     var u = P.url + "/query?where=" + encodeURIComponent("PID='" + String(pid).replace(/'/g,"''") + "'")
       + "&outFields=*&returnGeometry=true&outSR=102100&f=json";
@@ -539,7 +539,7 @@ function fetchParcelGeom(x, y, knownPID){
                areaSource: (m2!=null && m2>=5) ? "AREAUNITS" : "unpublished" };
     }).catch(function(){ return null; });
   }
-
+ 
   function pick(feats){
     feats = (feats||[]).filter(function(f){ return f.geometry && f.geometry.rings; });
     if(!feats.length) return null;
@@ -562,7 +562,7 @@ function fetchParcelGeom(x, y, knownPID){
       areaSource: "AREAUNITS"
     };
   }
-
+ 
   function query(bufferM){
     var geom = JSON.stringify({x:x,y:y,spatialReference:{wkid:102100}});
     var u = P.url + "/query?geometry=" + encodeURIComponent(geom)
@@ -571,7 +571,7 @@ function fetchParcelGeom(x, y, knownPID){
     if(bufferM) u += "&distance=" + bufferM + "&units=esriSRUnit_Meter";
     return j(u).then(function(d){ return d.features||[]; }).catch(function(){ return []; });
   }
-
+ 
   var authoritative = knownPID ? byPID(knownPID) : Promise.resolve(null);
   return authoritative.then(function(direct){
     if(direct) return direct;
@@ -602,7 +602,7 @@ function fetchParcelGeom(x, y, knownPID){
   });
   });
 }
-
+ 
 // Shoelace area on a Web Mercator ring, corrected for Mercator distortion at
 // this latitude (cos^2 lat) to approximate true ground area in m\u00b2.
 function ringAreaM2(geom, yMerc){
@@ -618,9 +618,9 @@ function ringAreaM2(geom, yMerc){
   }
   return Math.abs(a/2) * k * k;
 }
-
+ 
 var PARK_CODES = /^(PCF|OS|OSP|PK|POS)$/i;  // park / open-space zone codes (RC LUB)
-
+ 
 function abuttingZones(parcelGeom, ownZone, px, py){
   // Report zones near the subject parcel, split into differing zones and parks.
   // No across-the-road classification \u2014 the tool flags what to confirm on
@@ -643,13 +643,13 @@ function abuttingZones(parcelGeom, ownZone, px, py){
     return { diff:diff, parks:parks, method:"nearby" };
   }).catch(function(){ return {diff:[], parks:[], method:"failed"}; });
 }
-
+ 
 function nearbyApps(x, y){
   var u = pointQueryUrl(APPS_SVC, x, y, APPS_BUFFER_M) + "&resultRecordCount=5";
   return j(u).then(function(d){ return (d.features||[]).map(function(f){ return f.attributes; }); })
     .catch(function(){ return null; });
 }
-
+ 
 function geocode(text){
   var url = GEOCODER + "/findAddressCandidates?SingleLine=" + encodeURIComponent(text)
     + "&outFields=*&maxLocations=1&outSR=102100&f=json";
@@ -659,7 +659,7 @@ function geocode(text){
     return { x:c.location.x, y:c.location.y, label:c.address, score:c.score, attrs:c.attributes||{} };
   });
 }
-
+ 
 function queryCivic(where, limit){
   var c = state.civic;
   if(!c || c.error) return Promise.reject(new Error("Civic Addresses layer unavailable."));
@@ -672,7 +672,7 @@ function queryCivic(where, limit){
     }).filter(function(r){ return r.x!=null; });
   });
 }
-
+ 
 // ---------------------------------------------------------------------------
 // ORCHESTRATION
 // ---------------------------------------------------------------------------
@@ -685,7 +685,7 @@ function run(){
   p.catch(function(e){ showErr(e.message||"Lookup failed."); })
    .then(function(){ $("go").disabled = false; $("go").textContent = "Look up"; });
 }
-
+ 
 function runAddress(text){
   var start = (state.geoOK !== false)
     ? geocode(text).catch(function(){ state.geoOK = false; setDot("d-geo","down"); return null; })
@@ -706,7 +706,7 @@ function runAddress(text){
     });
   });
 }
-
+ 
 function runPID(text){
   var c = state.civic;
   if(!c || c.error) return Promise.reject(new Error("Civic Addresses layer unavailable."));
@@ -717,7 +717,7 @@ function runPID(text){
     return finish({ x:r.x, y:r.y, label:pickLabel(r.attrs)||("PID "+text), attrs:r.attrs });
   });
 }
-
+ 
 function pickLabel(attrs){
   var c = state.civic;
   if(c && c.addrFields){
@@ -725,7 +725,7 @@ function pickLabel(attrs){
   }
   return null;
 }
-
+ 
 function lookupPublishedArea(px, py, parcelAttrs){
   if(!AREA_LAYER) return Promise.resolve(null);
   // Prefer a key JOIN (AAN or PID from the subject parcel) over a spatial query \u2014
@@ -764,7 +764,7 @@ function lookupPublishedArea(px, py, parcelAttrs){
     return { m2:m2, field:AREA_LAYER.alias||AREA_LAYER.field };
   }).catch(function(){ return null; });
 }
-
+ 
 function polygonCentroid(geom){
   // Area-weighted centroid of a polygon's outer ring (guaranteed inside for
   // convex-ish parcels; adequate for zoning point-in-polygon). Falls back to
@@ -784,7 +784,7 @@ function polygonCentroid(geom){
   A*=0.5;
   return { x: cx/(6*A), y: cy/(6*A) };
 }
-
+ 
 function zoneAtParcel(parcelGeom){
   // Zoning has NO PID field \u2014 it can only be matched spatially. Query at the
   // parcel CENTROID (inside the true lot) rather than the geocoded address point,
@@ -798,7 +798,7 @@ function zoneAtParcel(parcelGeom){
     return f ? { attrs:f.attributes, zf:zf, centroid:c } : null;
   }).catch(function(){ return null; });
 }
-
+ 
 function finish(pt){
   var ll = mercToLatLon(pt.x, pt.y);
   return resolveCivicIdentity(pt.label).then(function(ident){
@@ -868,13 +868,13 @@ function finish(pt){
   });
   });
 }
-
+ 
 // ---------------------------------------------------------------------------
 // RENDERING
 // ---------------------------------------------------------------------------
 function clearOut(){ $("out").innerHTML = ""; $("empty").style.display = "none"; }
 function showErr(m){ clearOut(); $("out").innerHTML = '<div class="msg err">'+escH(m)+'</div>'; }
-
+ 
 function renderCandidates(rows){
   clearOut();
   var items = rows.map(function(r,i){
@@ -890,7 +890,7 @@ function renderCandidates(rows){
     };
   });
 }
-
+ 
 function cleanAttrs(attrs){
   return Object.keys(attrs||{}).filter(function(k){
     var v = attrs[k];
@@ -923,7 +923,7 @@ function heightCard(h){
   var metreRec  = storeyRec ? null : feats.find(function(a){ return a.MAXBLDHGT!=null; });
   h._resolved = { storeys: storeyRec?storeyRec.MAXBLDSTRY:null,
                   metres: metreRec?metreRec.MAXBLDHGT:null };
-
+ 
   var valHtml, note;
   if(storeyRec){
     valHtml = '<div class="hit-val">'+escH(storeyRec.MAXBLDSTRY)+' storeys</div>';
@@ -948,11 +948,28 @@ function heightCard(h){
     + (h.buffered?' <span class="hit-note">(nearest)</span>':'') + '</div>'
     + valHtml + note + prov + '</div>';
 }
-
+ 
+// BYLAW_AREA coded values (HRM domain LND_bylaw_1)
+var BYLAW_CODES = {1:"BED",2:"CHEB",3:"CHW",4:"DART",5:"DRTDO",6:"EPCW",7:"ESE",8:"ESW",9:"HMAIN",10:"HPEN",
+  11:"HPSBB",12:"LEPL",13:"LTWN",14:"MVDS",15:"NPLM",16:"PROS",17:"SACK",18:"SCKDR",19:"SHUB",20:"SMB",
+  21:"TLB",22:"DHFX",23:"RC",24:"SHA"};
+var BYLAW_NAMES = {RC:"Regional Centre LUB", SHA:"Suburban Housing Accelerator LUB"};
+function bylawLabel(attrs){
+  if(!attrs || attrs.BYLAW_AREA==null) return "";
+  var ab = BYLAW_CODES[attrs.BYLAW_AREA] || String(attrs.BYLAW_AREA);
+  return BYLAW_NAMES[ab] ? ab + " \u2014 " + BYLAW_NAMES[ab] : ab;
+}
+function hiValue(h){
+  var v = h.attrs[h.layer.hiField];
+  return String(v) + (h.layer.unit || "");
+}
+ 
 function hitCard(h){
   if(h.features) return heightCard(h);
   var headline = h.layer.hiField && h.attrs[h.layer.hiField] != null
-    ? '<div class="hit-val">'+escH(h.attrs[h.layer.hiField])+'</div>' : "";
+    ? '<div class="hit-val">'+escH(hiValue(h))+'</div>' : "";
+  if(headline && h.layer.bylaw && bylawLabel(h.attrs))
+    headline += '<div class="hit-note">By-law: '+escH(bylawLabel(h.attrs))+'</div>';
   var rest = cleanAttrs(h.attrs).filter(function(kv){ return kv[0] !== h.layer.hiField; });
   var restHtml = rest.length
     ? '<details class="grp"><summary>attributes ('+rest.length+')</summary>'
@@ -963,9 +980,9 @@ function hitCard(h){
     + (h.buffered ? ' <span class="hit-note">(within '+(h.layer.buffer||BUFFER_M)+' m)</span>' : "")
     + '</div>' + headline + restHtml + '</div>';
 }
-
+ 
 var LAST = null;
-
+ 
 function renderDisambiguation(pt, ident){
   clearOut();
   var rows = (ident.candidates||ident.allCandidates||[]).map(function(a,i){
@@ -991,7 +1008,7 @@ function renderDisambiguation(pt, ident){
     };
   });
 }
-
+ 
 function runResolvedIdentity(pt, ident){
   clearOut();
   $("go").disabled = true; $("go").textContent = "\u2026";
@@ -1033,7 +1050,7 @@ function runResolvedIdentity(pt, ident){
   }).catch(function(e){ showErr(e.message||"Lookup failed."); })
     .then(function(){ $("go").disabled=false; $("go").textContent="Look up"; });
 }
-
+ 
 function renderResult(R){
   LAST = R;
   clearOut();
@@ -1041,13 +1058,13 @@ function renderResult(R){
   var zoneHit = byGroup("zone")[0];
   var zoneVal = zoneHit && zoneHit.layer.hiField ? zoneHit.attrs[zoneHit.layer.hiField] : null;
   var reg = zoneVal ? REGS[String(zoneVal).toUpperCase().trim()] : null;
-
+ 
   var zoneHtml = zoneHit
     ? '<div class="zone-big">'+escH(zoneVal||"?")+'</div>'
       + '<div class="zone-src">'+escH(zoneHit.layer.label)+(zoneHit.buffered?' \u00b7 nearest (buffered)':"")+'</div>'
       + attrTable(zoneHit.attrs)
     : '<div class="muted">No adopted zoning polygon at this point.</div>';
-
+ 
   var bf = byGroup("builtform");
   var bfHtml = bf.length ? bf.map(hitCard).join("")
     : '<div class="muted">No mapped built-form schedules intersect this point (these layers mostly cover the Regional Centre / Downtown plan areas).</div>';
@@ -1063,15 +1080,15 @@ function renderResult(R){
     }
     if(reg.cite) bfHtml += '<div class="muted">'+escH(reg.cite)+'</div>';
   }
-
+ 
   var ov = byGroup("overlay");
   var checkedOv = state.layers.filter(function(L){ return L.group==="overlay"; }).length;
   var ovHtml = (ov.length ? ov.map(hitCard).join("") : "")
     + '<div class="muted">'+ov.length+' of '+checkedOv+' overlay layers apply at this location.</div>';
-
+ 
   var cx = byGroup("context");
   var cxHtml = cx.length ? cx.map(hitCard).join("") : '<div class="muted">No plan-context polygons returned.</div>';
-
+ 
 var abut = R.abut || {diff:[], parks:[], method:"none"};
   var abutHtml;
   if(!R.hasParcel){
@@ -1093,7 +1110,7 @@ var abut = R.abut || {diff:[], parks:[], method:"none"};
         + '<div class="muted">All parcels nearby carry the same zone; no park abutter. No Table 14 buffer or shadow trigger on zoning grounds.</div>';
     }
   }
-
+ 
   var appsHtml;
   if(R.apps === null){
     appsHtml = '<div class="muted">Planning-applications layer not reachable.</div>';
@@ -1107,9 +1124,9 @@ var abut = R.abut || {diff:[], parks:[], method:"none"};
       return '<div class="hit">'+rows+'</div>';
     }).join("");
   }
-
+ 
   var parcelHit = byGroup("parcel")[0];
-
+ 
   var juris = R.inRC
     ? ''
     : '<div class="section" style="background:#FBF3E4;border-left:3px solid var(--wait)">'
@@ -1119,7 +1136,7 @@ var abut = R.abut || {diff:[], parks:[], method:"none"};
       + 'They do <b>not</b> apply here. Zone, overlays, parcel and plan-context below are still valid, but built-form '
       + 'standards must come from the applicable LUB (e.g. Bedford, Sackville, Mainland, or a rural LUB). '
       + '<b>Planner review required</b> \u2014 do not rely on any built-form schedule values for this site.</div></div>';
-
+ 
   $("out").innerHTML =
     '<div class="panel res">'
     + juris
@@ -1159,7 +1176,7 @@ var abut = R.abut || {diff:[], parks:[], method:"none"};
   $("copy").onclick = copyCutSheet;
   var g = $("gencs"); if(g) g.onclick = generateCutsheet;
 }
-
+ 
 function buildIntakeText(R){
   var hitsBy = function(g){ return R.hits.filter(function(h){ return h.layer.group===g; }); };
   var zoneHit = hitsBy("zone")[0];
@@ -1167,10 +1184,10 @@ function buildIntakeText(R){
   var pid = state.civic && state.civic.pidField && R.pt.attrs ? R.pt.attrs[state.civic.pidField] : null;
   var boundary = (R.abut && ((R.abut.diff && R.abut.diff.length) || (R.abut.parks && R.abut.parks.length))) ? true : false;
   var anyBuffered = R.hits.some(function(h){ return h.buffered && (h.layer.group==="zone"||h.layer.group==="builtform"); });
-
-  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v37)\n";
+ 
+  var t = "CUT SHEET INTAKE \u2014 GIS PRE-CHECK (HRM lookup tool v38)\n";
   t += "Generated: " + new Date().toISOString().slice(0,10) + "  \u00b7 Source: HRM Open Data live point query\n\n";
-
+ 
   t += "SITE\n";
   t += "Civic address: " + (R.pt.label||"\u2014") + "\n";
   t += "PID: " + (pid||"\u2014 (confirm)") + "\n";
@@ -1184,7 +1201,7 @@ function buildIntakeText(R){
     t += "  Regional Centre built-form schedules DO NOT APPLY. Zone/overlays valid; built-form must come from the applicable LUB (Bedford/Sackville/Mainland/rural). PLANNER REVIEW REQUIRED.\n";
   }
   t += "\n";
-
+ 
   t += "MAPPED SCHEDULE VALUES (GIS-read \u2014 acceptable per rev-4 unless flagged)\n";
   var bf = hitsBy("builtform");
   if(R.inRC === false){
@@ -1205,14 +1222,15 @@ function buildIntakeText(R){
         t += "- " + h.layer.label + ": " + val + tag + "\n";
         return;
       }
-      var v = h.layer.hiField && h.attrs[h.layer.hiField]!=null ? h.attrs[h.layer.hiField] : "(see attributes)";
+      var v = h.layer.hiField && h.attrs[h.layer.hiField]!=null ? hiValue(h) : "(see attributes)";
+      if(h.layer.bylaw && bylawLabel(h.attrs)) v += "  [" + bylawLabel(h.attrs) + "]";
       t += "- " + h.layer.label + ": " + v + (h.buffered?"  [within "+(h.layer.buffer||BUFFER_M)+" m of point \u2014 corner lots may carry two frontage values; VERIFY]":"") + "\n";
     });
   } else {
     t += "- No mapped built-form schedules intersect this point.\n";
   }
   t += "\n";
-
+ 
   t += "OVERLAYS \u2014 explicit status\n";
   var ovAll = state.layers.filter(function(L){ return L.group==="overlay"; });
   ovAll.forEach(function(L){
@@ -1225,7 +1243,7 @@ function buildIntakeText(R){
     }
   });
   t += "\n";
-
+ 
   t += "PLAN CONTEXT\n";
   hitsBy("context").forEach(function(h){
     var v = h.layer.hiField && h.attrs[h.layer.hiField]!=null ? ": "+h.attrs[h.layer.hiField] : "";
@@ -1234,7 +1252,7 @@ function buildIntakeText(R){
     t += "- " + h.layer.label + (v||name) + "\n";
   });
   t += "\n";
-
+ 
   var abut = R.abut || {diff:[], parks:[]};
   var hasDiff = abut.diff && abut.diff.length;
   var hasPark = abut.parks && abut.parks.length;
@@ -1251,19 +1269,19 @@ function buildIntakeText(R){
     t += "NEARBY APPLICATIONS (" + APPS_BUFFER_M + " m): " + R.apps.length + " \u2014 see tool output\n";
   }
   t += "\n";
-
+ 
   t += "NOT READ BY THIS TOOL \u2014 LUB TEXT / SCREENSHOT ITEMS\n";
   t += "- Side setback: LUB text (s. 229 ER / s. 113 corridor, chapter-specific) + Schedule 3C modifications\n";
   t += "- Rear setback: LUB text (s. 230 or chapter equivalent)\n";
   t += "- Min lot area / frontage / lot coverage: LUB Tables (2/3/6/10)\n";
   t += "- Schedule 3C special-area status: NOT confirmed by tool \u2014 parcel-scale screenshot required for ER sites\n";
   t += "- Abutter zones per side: tool reports zones within " + ADJ_BUFFER_M + " m, not per-lot-line \u2014 confirm from zoning screenshot\n\n";
-
+ 
   t += "VERIFICATION FLAGS\n";
   if(boundary) t += "- DIFFERING ZONE / PARK NEARBY: confirm on the zoning overlay whether it abuts (property line) or sits across a street; differing zone \u2192 Table 14 buffer / side-setback / stepback, park \u2192 shadow analysis\n";
   if(anyBuffered) t += "- BUFFERED READ: one or more schedule values matched by proximity, not exact point \u2014 verify at parcel scale\n";
   if(!boundary && !anyBuffered) t += "- None \u2014 clean point reads; screenshots optional per rev-4\n";
-
+ 
   t += "\nPLANNER REVIEW REQUIRED\n";
   if(R.inRC === false) t += "- JURISDICTION: confirm applicable LUB for " + (R.community||"this community") + "; Regional Centre schedule values are not applicable here\n";
   var zoneStr = String(zoneVal||"").toUpperCase();
@@ -1287,16 +1305,16 @@ function buildIntakeText(R){
     t += "- NOT CHECKED (layer unreachable \u2014 verify by other means): " + dead.map(function(L){ return L.label; }).join("; ") + "\n";
   }
   t += "- Side/rear setbacks, lot coverage, min lot area/frontage: LUB text \u2014 planner to confirm (not GIS-mapped)\n";
-
+ 
   return t;
 }
-
+ 
 function copyCutSheet(){
   if(!LAST) return;
   navigator.clipboard && navigator.clipboard.writeText(buildIntakeText(LAST));
   var b = $("copy"); b.textContent = "Copied"; setTimeout(function(){ b.textContent = "Copy intake"; },1400);
 }
-
+ 
 function generateCutsheet(){
   if(!LAST) return;
   var t = "Generate a DRAFT planning cut sheet from this GIS pre-check intake, per the project instructions (rev-4). "
@@ -1308,7 +1326,7 @@ function generateCutsheet(){
          setTimeout(function(){ b.textContent = "Generate draft cut sheet \u2192"; }, 3000); }
   window.open(CUTSHEET_PROJECT_URL, "_blank");
 }
-
+ 
 function renderAdv(){
   var lines = [];
   if(state.network===false) lines.push("BLOCKED \u2014 sandboxed environment prevents outbound requests.\n");
@@ -1325,7 +1343,7 @@ function renderAdv(){
   lines.push("lot area source: parcel AREAUNITS string (value+unit parsed)" + (AREA_LAYER ? "; fallback layer: " + AREA_LAYER.url : ""));
   $("adv").textContent = lines.join("\n");
 }
-
+ 
 // ---------------------------------------------------------------------------
 Array.prototype.forEach.call(document.querySelectorAll(".mode"), function(b){
   b.onclick = function(){
